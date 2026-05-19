@@ -16,6 +16,6 @@ jobs:
         run: npm install -g @railway/cli
 
       - name: Deploy to Railway
-        run: railway up --service knoxbot --project 54d6ee79-b184-4186-8df2-a2788a2ab75f
+        run: run: railway up --service knoxbot --project 54d6ee79-b184-4186-8df2-a2788a2ab75f --environment production
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
