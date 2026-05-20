@@ -9,13 +9,12 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Install Railway CLI
-        run: run: npm install -g @railway/cli@3.12.1
+        run: npm install -g @railway/cli
 
-      - name: Deploy to Railway
+      - name: Deploy
         run: railway up --service knoxbot --project 54d6ee79-b184-4186-8df2-a2788a2ab75f --environment production --ci
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
