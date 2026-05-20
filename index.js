@@ -195,4 +195,3 @@ discord.on('messageCreate', (msg) => {
 
 discord.login(process.env.DISCORD_TOKEN);
 
-});
