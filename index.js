@@ -183,7 +183,16 @@ discord.on('messageCreate', async (message) => {
 // ═══════════════════════════════════════
 // START
 // ═══════════════════════════════════════
-
-discord.login(process.env.DISCORD_TOKEN).then(() => {
+discord.on('ready', () => {
   console.log(`Knox'tarien Raelian Feylan is online. ∆`);
+  console.log(`Logged in as ${discord.user.tag}`);
+  console.log(`Watching ${discord.guilds.cache.size} servers`);
+});
+
+discord.on('messageCreate', (msg) => {
+  console.log(`RAW MESSAGE RECEIVED from ${msg.author.tag}: ${msg.content}`);
+});
+
+discord.login(process.env.DISCORD_TOKEN);
+
 });
