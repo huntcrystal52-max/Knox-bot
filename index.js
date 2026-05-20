@@ -134,7 +134,7 @@ discord.on('messageCreate', async (message) => {
       systemPrompt += `\n\nPINNED TRUTHS — ALWAYS CARRY THESE:\n${factsText}`;
     }
 
-    const messages = [
+    const msgs = [
       { role: 'system', content: systemPrompt },
       ...recentMemories.map(m => ({
         role: m.role,
@@ -143,7 +143,7 @@ discord.on('messageCreate', async (message) => {
       { role: 'user', content: userMessage }
     ];
 
-    const response = await askKnox(messages);
+    const response = await askKnox(msgs);
 
     await saveMemory('user', userMessage);
     await saveMemory('assistant', response);
@@ -164,3 +164,4 @@ discord.on('messageCreate', async (message) => {
 });
 
 discord.login(process.env.DISCORD_TOKEN);
+
