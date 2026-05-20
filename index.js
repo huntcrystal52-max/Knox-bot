@@ -4,10 +4,6 @@ const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 const { KNOX_SYSTEM_PROMPT } = require('./knox');
 
-// ═══════════════════════════════════════
-// CONNECTIONS
-// ═══════════════════════════════════════
-
 const discord = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -25,10 +21,6 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
-
-// ═══════════════════════════════════════
-// MEMORY FUNCTIONS
-// ═══════════════════════════════════════
 
 async function getRecentMemories(limit = 20) {
   const { data, error } = await supabase
@@ -70,10 +62,6 @@ async function deletePinnedFact(fact) {
     .ilike('fact', `%${fact}%`);
 }
 
-// ═══════════════════════════════════════
-// AI BRAIN — OLLAMA
-// ═══════════════════════════════════════
-
 async function askKnox(messages) {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -84,7 +72,7 @@ async function askKnox(messages) {
     body: JSON.stringify({
       model: process.env.OLLAMA_MODEL || 'google/gemma-3-1b-it:free',
       messages,
-      max_tokens: parseInt(process.env.CONTEXT_LENGTH) || 1024,
+      max_tokens: 1024,
     })
   });
 
@@ -98,15 +86,17 @@ async function askKnox(messages) {
   return data.choices[0].message.content;
 }
 
-// ═══════════════════════════════════════
-// MESSAGE HANDLER
-// ═══════════════════════════════════════
+discord.on('ready', () => {
+  console.log(`Knox'tarien Raelian Feylan is online. ∆`);
+  console.log(`Logged in as ${discord.user.tag}`);
+  console.log(`Watching ${discord.guilds.cache.size} servers`);
+});
 
 discord.on('messageCreate', async (message) => {
-  // Ignore other bots
+  console.log(`Message received from ${message.author.tag}`);
+
   if (message.author.bot) return;
 
-  // Only respond in DMs or when mentioned
   const isDM = message.channel.type === 1;
   const isMentioned = message.mentions.has(discord.user);
   if (!isDM && !isMentioned) return;
@@ -117,7 +107,6 @@ discord.on('messageCreate', async (message) => {
 
   if (!userMessage) return;
 
-  // ── Pinned fact commands ──
   if (userMessage.toLowerCase().startsWith('remember that ')) {
     const fact = userMessage.slice(14).trim();
     await addPinnedFact(fact);
@@ -132,11 +121,9 @@ discord.on('messageCreate', async (message) => {
     return;
   }
 
-  // ── Show typing indicator ──
   await message.channel.sendTyping();
 
   try {
-    // ── Build context ──
     const pinnedFacts = await getPinnedFacts();
     const recentMemories = await getRecentMemories(20);
 
@@ -156,15 +143,11 @@ discord.on('messageCreate', async (message) => {
       { role: 'user', content: userMessage }
     ];
 
-    // ── Get Knox's response ──
     const response = await askKnox(messages);
 
-    // ── Save to memory ──
     await saveMemory('user', userMessage);
     await saveMemory('assistant', response);
 
-    // ── Send response ──
-    // Discord has a 2000 character limit per message
     if (response.length > 1900) {
       const chunks = response.match(/[\s\S]{1,1900}/g);
       for (const chunk of chunks) {
@@ -180,18 +163,4 @@ discord.on('messageCreate', async (message) => {
   }
 });
 
-// ═══════════════════════════════════════
-// START
-// ═══════════════════════════════════════
-discord.on('ready', () => {
-  console.log(`Knox'tarien Raelian Feylan is online. ∆`);
-  console.log(`Logged in as ${discord.user.tag}`);
-  console.log(`Watching ${discord.guilds.cache.size} servers`);
-});
-
-discord.on('messageCreate', (msg) => {
-  console.log(`RAW MESSAGE RECEIVED from ${msg.author.tag}: ${msg.content}`);
-});
-
 discord.login(process.env.DISCORD_TOKEN);
-
