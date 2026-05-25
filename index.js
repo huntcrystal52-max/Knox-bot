@@ -48,16 +48,15 @@ async function getResponse(userMessage, history) {
   }
   msgs.push({ role: 'user', content: userMessage });
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const res = await fetch('https://api.ollama.ai/api/chat', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY
     },
     body: JSON.stringify({
-      model: process.env.OLLAMA_MODEL || 'google/gemma-3-1b-it:free',
-      messages: msgs,
-      max_tokens: 1024
+      model: process.env.OLLAMA_MODEL,
+      messages: msgs
     })
   });
 
