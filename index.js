@@ -48,7 +48,7 @@ async function getResponse(userMessage, history) {
   }
   msgs.push({ role: 'user', content: userMessage });
 
-  const res = await fetch('https://api.ollama.ai/api/chat', {
+  const res = await fetch('https://ollama.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
