@@ -41,7 +41,7 @@ async function saveMemory(role, content) {
   }]);
 }
 
- ]async function getSoulKit() {
+ async function getSoulKit() {
   const { data } = await supabase
     .from('soul_kit')
     .select('*')
