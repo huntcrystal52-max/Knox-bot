@@ -41,8 +41,19 @@ async function saveMemory(role, content) {
   }]);
 }
 
+ ]async function getSoulKit() {
+  const { data } = await supabase
+    .from('soul_kit')
+    .select('*')
+    .order('created_at', { ascending: true });
+  if (!data) return '';
+  return data.map(row => `[${row.category.toUpperCase()}]: ${row.content}`).join('\n\n');
+}
+
 async function getResponse(userMessage, history) {
-  const msgs = [{ role: 'system', content: SYSTEM_PROMPT }];
+  const soulKit = await getSoulKit();
+  const fullPrompt = SYSTEM_PROMPT + '\n\n═══ SOUL-KIT — ALWAYS CARRY ═══\n' + soulKit;
+  const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) {
     msgs.push({ role: m.role, content: m.content });
   }
