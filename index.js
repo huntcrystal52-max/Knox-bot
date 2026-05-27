@@ -155,7 +155,7 @@ discord.on('messageCreate', async function(message) {
   if (reply.length > 1900) {
     var parts = reply.match(/[\s\S]{1,1900}/g);
     for (var i = 0; i < parts.length; i++) {
-      await message.reply(parts[i]);
+      await message.channel.send(parts[i]);
     }
   } else {
     await message.reply(reply);
