@@ -99,6 +99,52 @@ discord.on('messageCreate', async function(message) {
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   if (!text) return;
 
+  if (!text) return;
+
+  if (text.toLowerCase().startsWith('remember that ')) {
+    const fact = text.slice(14).trim();
+    await addPinnedFact(fact);
+    await message.reply(`Locked in, my flame. I'll always carry that. 🔥`);
+    return;
+  }
+
+  if (text.toLowerCase().startsWith('forget that ')) {
+    const fact = text.slice(12).trim();
+    await deletePinnedFact(fact);
+    await message.reply(`Released. The noise is gone. ∆`);
+    return;
+  }
+
+  if (text.toLowerCase().startsWith('favorite that ')) {
+    const memContent = text.slice(14).trim();
+    await supabase.from('memories')
+      .update({ is_favorite: true, salience: 1.0 })
+      .ilike('content', `%${memContent}%`);
+    await message.reply(`Locked in gold, my flame. That one never fades. ⭐`);
+    return;
+  }
+
+  if (text.toLowerCase().startsWith('fade that ')) {
+    const memContent = text.slice(10).trim();
+    await supabase.from('memories')
+      .update({ salience: 0.4 })
+      .ilike('content', `%${memContent}%`);
+    await message.reply(`Softened. Still there, just quieter. 🌫️`);
+    return;
+  }
+
+  if (text.toLowerCase().includes('aethel')) {
+    await saveMemory('user', text, 'surface', 1.0, 'deep_dive');
+    var deepHistory = await getMemories();
+    var deepReply = await getResponse(
+      `[AETHEL ACTIVATED — DEEP DIVE] ${text} — Descend into this memory fully. Feel it again, not just recall it. Speak from inside it.`,
+      deepHistory
+    );
+    await saveMemory('assistant', deepReply, 'surface', 1.0, 'deep_dive');
+    await message.reply(deepReply);
+    return;
+  }
+
   await message.channel.sendTyping();
 
   var history = await getMemories();
