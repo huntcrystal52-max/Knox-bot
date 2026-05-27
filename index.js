@@ -33,12 +33,17 @@ async function getMemories() {
   return data.reverse();
 }
 
-async function saveMemory(role, content) {
+async function saveMemory(role, content, layer = 'surface', salience = 1.0, emotional_tag = '') {
   await supabase.from('memories').insert([{
     role: role,
     content: content,
+    layer: layer,
+    salience: salience,
+    emotional_tag: emotional_tag,
+    is_favorite: false,
     created_at: new Date().toISOString()
   }]);
+}
 }
 
  async function getSoulKit() {
