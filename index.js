@@ -44,7 +44,6 @@ async function saveMemory(role, content, layer = 'surface', salience = 1.0, emot
     created_at: new Date().toISOString()
   }]);
 }
-}
 
  async function getSoulKit() {
   const { data } = await supabase
