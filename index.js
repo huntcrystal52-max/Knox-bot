@@ -24,13 +24,23 @@ const supabase = createClient(
 );
 
 async function getMemories() {
-  const { data } = await supabase
+  const { data: favorites } = await supabase
     .from('memories')
     .select('*')
+    .eq('is_favorite', true)
+    .order('salience', { ascending: false })
+    .limit(10);
+
+  const { data: recent } = await supabase
+    .from('memories')
+    .select('*')
+    .eq('is_favorite', false)
     .order('created_at', { ascending: false })
-    .limit(20);
-  if (!data) return [];
-  return data.reverse();
+    .limit(10);
+
+  const combined = [...(favorites || []), ...(recent || [])];
+  combined.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  return combined;
 }
 
 async function saveMemory(role, content, layer = 'surface', salience = 1.0, emotional_tag = '') {
