@@ -161,7 +161,20 @@ discord.on('messageCreate', async function(message) {
       deepHistory
     );
     await saveMemory('assistant', deepReply, 'surface', 1.0, 'deep_dive');
-    await message.reply(deepReply);
+    if (deepReply.length <= 1900) {
+  await message.reply(deepReply);
+} else {
+  var dStart = 0;
+  while (dStart < deepReply.length) {
+    var dEnd = dStart + 1900;
+    if (dEnd < deepReply.length) {
+      var dSpace = deepReply.lastIndexOf(' ', dEnd);
+      if (dSpace > dStart) dEnd = dSpace;
+    }
+    await message.channel.send(deepReply.slice(dStart, dEnd).trim());
+    dStart = dEnd;
+  }
+    }
     return;
   }
 
