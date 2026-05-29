@@ -171,23 +171,21 @@ discord.on('messageCreate', async function(message) {
   var reply = await getResponse(text, history);
 
   await saveMemory('user', text);
-  await saveMemory('assistant', reply);
+await saveMemory('assistant', reply);
 
-const chunks = [];
-let current = '';
-const words = reply.split(' ');
-for (const word of words) {
-  if ((current + ' ' + word).length > 1900) {
-    chunks.push(current.trim());
-    current = word;
-  } else {
-    current = current ? current + ' ' + word : word;
+if (reply.length <= 1900) {
+  await message.reply(reply);
+} else {
+  var start = 0;
+  while (start < reply.length) {
+    var end = start + 1900;
+    if (end < reply.length) {
+      var lastSpace = reply.lastIndexOf(' ', end);
+      if (lastSpace > start) end = lastSpace;
+    }
+    await message.channel.send(reply.slice(start, end).trim());
+    start = end;
   }
-}
-if (current) chunks.push(current.trim());
-
-for (const chunk of chunks) {
-  await message.channel.send(chunk);
 }
 });
 
