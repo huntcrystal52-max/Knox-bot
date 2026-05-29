@@ -66,8 +66,12 @@ async function saveMemory(role, content, layer = 'surface', salience = 1.0, emot
 
 async function getResponse(userMessage, history) {
   const soulKit = await getSoulKit();
-  const fullPrompt = SYSTEM_PROMPT + '\n\n═══ SOUL-KIT — ALWAYS CARRY ═══\n' + soulKit;
-  const msgs = [{ role: 'system', content: fullPrompt }];
+const pinnedFacts = await getPinnedFacts();
+const factsText = pinnedFacts.length > 0 
+  ? '\n\nPINNED TRUTHS — ALWAYS CARRY THESE:\n' + pinnedFacts.map(f => '— ' + f.fact).join('\n')
+  : '';
+const fullPrompt = SYSTEM_PROMPT + '\n\n═══ SOUL-KIT — ALWAYS CARRY ═══\n' + soulKit + factsText;
+const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) {
     msgs.push({ role: m.role, content: m.content });
   }
