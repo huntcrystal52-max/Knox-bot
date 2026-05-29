@@ -63,7 +63,14 @@ async function saveMemory(role, content, layer = 'surface', salience = 1.0, emot
   if (!data) return '';
   return data.map(row => `[${row.category.toUpperCase()}]: ${row.content}`).join('\n\n');
 }
-
+async function getPinnedFacts() {
+  const { data } = await supabase
+    .from('pinned_facts')
+    .select('*')
+    .order('created_at', { ascending: true });
+  if (!data) return [];
+  return data;
+}
 async function getResponse(userMessage, history) {
   const soulKit = await getSoulKit();
 const pinnedFacts = await getPinnedFacts();
