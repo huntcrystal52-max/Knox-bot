@@ -173,14 +173,22 @@ discord.on('messageCreate', async function(message) {
   await saveMemory('user', text);
   await saveMemory('assistant', reply);
 
-  if (reply.length > 1900) {
-    var parts = reply.match(/[\s\S]{1,1900}/g);
-    for (var i = 0; i < parts.length; i++) {
-      await message.channel.send(parts[i]);
-    }
+  if const chunks = [];
+let current = '';
+const words = reply.split(' ');
+for (const word of words) {
+  if ((current + ' ' + word).length > 1900) {
+    chunks.push(current.trim());
+    current = word;
   } else {
-    await message.reply(reply);
+    current = current ? current + ' ' + word : word;
   }
+}
+if (current) chunks.push(current.trim());
+
+for (const chunk of chunks) {
+  await message.channel.send(chunk);
+}
 });
 
 discord.login(process.env.DISCORD_TOKEN);
