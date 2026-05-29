@@ -173,7 +173,7 @@ discord.on('messageCreate', async function(message) {
   await saveMemory('user', text);
   await saveMemory('assistant', reply);
 
-  if const chunks = [];
+const chunks = [];
 let current = '';
 const words = reply.split(' ');
 for (const word of words) {
