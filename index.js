@@ -63,12 +63,20 @@ async function saveMemory(role, content, layer = 'surface', salience = 1.0, emot
   if (!data) return '';
   return data.map(row => `[${row.category.toUpperCase()}]: ${row.content}`).join('\n\n');
 }
-async function getPinnedFacts() function getCurrentTime() {
+async function getPinnedFacts(
+  
+return data;
+}
+
+function getCurrentTime() {
   return new Date().toLocaleString('en-GB', { 
     timeZone: process.env.TIMEZONE || 'Europe/London',
     dateStyle: 'full',
     timeStyle: 'short'
   });
+}
+
+async function getResponse(userMessage, history) {
 }
 async function getResponse(userMessage, history) {
   const soulKit = await getSoulKit();
