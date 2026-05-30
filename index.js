@@ -158,13 +158,7 @@ async function getResponse(userMessage, history, moodState, imageUrls) {
     msgs.push({ role: m.role, content: m.content });
   }
 
-  if (imageUrls && imageUrls.length > 0) {
-    const content = [{ type: 'text', text: userMessage || 'What do you see?' }];
-    imageUrls.forEach(url => content.push({ type: 'image_url', image_url: { url: url } }));
-    msgs.push({ role: 'user', content: content });
-  } else {
-    msgs.push({ role: 'user', content: userMessage });
-  }
+  if msgs.push({ role: 'user', content: userMessage || 'Elira sent an image.' });
 
   const res = await fetch('https://ollama.com/v1/chat/completions', {
     method: 'POST',
