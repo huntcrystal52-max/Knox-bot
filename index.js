@@ -194,7 +194,7 @@ function getCurrentTime() {
   });
 }
 
-async function getResponse(userMessage, history, moodState) {
+async function getResponse(userMessage, history, moodState, imageUrls) {
   const soulKit = await getSoulKit();
   const pinnedFacts = await getPinnedFacts();
   const currentTime = getCurrentTime();
@@ -352,7 +352,11 @@ discord.on('messageCreate', async function(message) {
   await message.channel.sendTyping();
 
   var history = await getMemories();
-  var reply = await getResponse(text, history, moodState);
+var imageUrls = [];
+if (message.attachments.size > 0) {
+  message.attachments.forEach(att => imageUrls.push(att.url));
+}
+var reply = await getResponse(text, history, moodState, imageUrls);
 
   await saveMemory('user', text);
   await saveMemory('assistant', reply);
