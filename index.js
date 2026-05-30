@@ -71,6 +71,15 @@ async function getPinnedFacts() {
   if (!data) return [];
   return data;
 }
+function getCurrentTime() {
+  return new Date().toLocaleString('en-GB', { 
+    timeZone: process.env.TIMEZONE || 'Europe/London',
+    dateStyle: 'full',
+    timeStyle: 'short'
+  });
+}
+const currentTime = getCurrentTime();
+const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + currentTime + '\n\n═══
 async function getResponse(userMessage, history) {
   const soulKit = await getSoulKit();
 const pinnedFacts = await getPinnedFacts();
