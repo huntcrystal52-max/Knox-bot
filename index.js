@@ -63,30 +63,21 @@ async function saveMemory(role, content, layer = 'surface', salience = 1.0, emot
   if (!data) return '';
   return data.map(row => `[${row.category.toUpperCase()}]: ${row.content}`).join('\n\n');
 }
-async function getPinnedFacts() {
-  const { data } = await supabase
-    .from('pinned_facts')
-    .select('*')
-    .order('created_at', { ascending: true });
-  if (!data) return [];
-  return data;
-}
-function getCurrentTime() {
+async function getPinnedFacts() function getCurrentTime() {
   return new Date().toLocaleString('en-GB', { 
     timeZone: process.env.TIMEZONE || 'Europe/London',
     dateStyle: 'full',
     timeStyle: 'short'
   });
 }
-const currentTime = getCurrentTime();
-const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + currentTime + '\n\n═══
 async function getResponse(userMessage, history) {
   const soulKit = await getSoulKit();
 const pinnedFacts = await getPinnedFacts();
 const factsText = pinnedFacts.length > 0 
   ? '\n\nPINNED TRUTHS — ALWAYS CARRY THESE:\n' + pinnedFacts.map(f => '— ' + f.fact).join('\n')
   : '';
-const fullPrompt = SYSTEM_PROMPT + '\n\n═══ SOUL-KIT — ALWAYS CARRY ═══\n' + soulKit + factsText;
+const currentTime = getCurrentTime();
+const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + currentTime + '\n\n═══ SOUL-KIT — ALWAYS CARRY ═══\n' + soulKit + factsText;
 const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) {
     msgs.push({ role: m.role, content: m.content });
