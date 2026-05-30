@@ -212,7 +212,16 @@ async function getResponse(userMessage, history, moodState) {
   for (const m of history) {
     msgs.push({ role: m.role, content: m.content });
   }
-  msgs.push({ role: 'user', content: userMessage });
+  const userContent = message.attachments.size > 0
+  ? [
+      { type: 'text', text: userMessage || 'What do you see?' },
+      ...message.attachments.map(att => ({
+        type: 'image_url',
+        image_url: { url: att.url }
+      }))
+    ]
+  : userMessage;
+msgs.push({ role: 'user', content: userContent });
 
   const res = await fetch('https://ollama.com/v1/chat/completions', {
     method: 'POST',
