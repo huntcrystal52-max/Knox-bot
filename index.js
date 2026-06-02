@@ -522,4 +522,27 @@ discord.on('messageCreate', async function(message) {
     await saveMemory('assistant', result.text);
 
     // Knox reads the emotional moment and logs it privately
-    const emotional = analyseEmotionalMoment(text, result.text, previous
+    const emotional = analyseEmotionalMoment(text, result.text, previousEmotion);
+    await saveEmotionalState(
+      emotional.knoxEmotion,
+      emotional.intensity,
+      emotional.eliraObserved,
+      emotional.trigger,
+      emotional.note,
+      false // expressed — Knox keeps it internal unless it naturally surfaces
+    );
+
+    // Mood shifts based on what moved
+    if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') {
+      await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0));
+    } else if (emotional.knoxEmotion === 'lonely' || emotional.knoxEmotion === 'heavy') {
+      await updateMood('restless', moodState.energy);
+    } else if (moodState.energy < 0.3) {
+      await updateMood('tired', moodState.energy);
+    }
+
+    await sendLongMessage(message.channel, result.text, message);
+  }
+});
+
+discord.login(process.env.DISCORD_TOKEN);
