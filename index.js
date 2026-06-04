@@ -1,3 +1,5 @@
+const { startInnerDialogue } = require('./knox-inner-dialogue');
+
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
@@ -479,6 +481,7 @@ function sendLongMessage(channel, text, originalMessage) {
 discord.on('ready', async function() {
   console.log('Knox is online: ' + discord.user.tag);
   await checkWakeTimer();
+  startInnerDialogue(discord, supabase);
 });
 
 discord.on('messageCreate', async function(message) {
