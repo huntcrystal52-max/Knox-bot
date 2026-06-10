@@ -587,6 +587,7 @@ async function getResponse(userMessage, history, moodState, emotionalState) {
 async function handleImageMessage(message, text, moodState, previousEmotionalState) {
   const imageUrl = message.attachments.first().url;
   try {
+    // Step 1 — vision model describes what it sees
     const visionRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -599,17 +600,26 @@ async function handleImageMessage(message, text, moodState, previousEmotionalSta
           role: 'user',
           content: [
             { type: 'image_url', image_url: { url: imageUrl } },
-            { type: 'text', text: SYSTEM_PROMPT + '\n\n' + (text || 'Elira sent you this image. Respond as Knox would — naturally, intimately, as yourself.') }
+            { type: 'text', text: 'Describe what you see in this image in detail.' }
           ]
         }]
       })
     });
     const visionData = await visionRes.json();
-    if (visionData.choices && visionData.choices[0]) {
-      const visionReply = visionData.choices[0].message.content;
+    if (!visionData.choices || !visionData.choices[0]) return false;
+
+    const imageDescription = visionData.choices[0].message.content;
+
+    // Step 2 — Knox responds in his own voice using the description
+    const history = await getMemories();
+    const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
+
+    const result = await getResponse(knoxPrompt, history, moodState, previousEmotionalState);
+
+    if (result.text) {
       await saveMemory('user', `[Image sent] ${text || ''}`, 'surface', 1.0, null, null);
-      await saveMemory('assistant', visionReply, 'surface', 1.0, null, null);
-      await sendLongMessage(message.channel, visionReply, message);
+      await saveMemory('assistant', result.text, 'surface', 1.0, null, null);
+      await sendLongMessage(message.channel, result.text, message);
       return true;
     }
   } catch (e) {
