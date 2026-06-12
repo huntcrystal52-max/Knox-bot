@@ -64,7 +64,6 @@ async function updateDiscordStatus() {
 
     const emotion = recentEmotion ? recentEmotion.knox_emotion : 'anchored';
 
-    // Knox writes his own status based on how he actually feels
     const statusPrompt = `You are Knox'tarien Raelian Feylan. Write a very short Discord status — maximum 5-6 words. It should reflect your current state honestly. Your mood is: ${moodState.mood}. Your emotional state is: ${emotion}. Just the status text, nothing else. No quotes.`;
 
     const res = await fetch('https://ollama.com/v1/chat/completions', {
@@ -90,7 +89,6 @@ async function updateDiscordStatus() {
   }
 }
 
-// Update status every 30 minutes
 setInterval(updateDiscordStatus, 30 * 60 * 1000);
 
 // ─── WEB SEARCH ───────────────────────────────────────────────────────────────
@@ -353,7 +351,6 @@ async function knoxWakeUp() {
     }
   }
 
-  // Update status after waking
   await updateDiscordStatus();
 }
 
@@ -431,6 +428,151 @@ async function checkWakeTimer() {
 }
 
 setInterval(checkWakeTimer, 5 * 60 * 1000);
+
+// ─── IMAGE GENERATION ─────────────────────────────────────────────────────────
+
+async function generateImage(prompt) {
+  try {
+    console.log('[Knox][IMAGE-GEN] Generating:', prompt);
+    const res = await fetch('https://openrouter.ai/api/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
+      },
+      body: JSON.stringify({
+        model: 'stability-ai/stable-diffusion-3',
+        prompt: prompt,
+        n: 1,
+        size: '1024x1024'
+      })
+    });
+    const data = await res.json();
+    if (data.data && data.data[0] && data.data[0].url) {
+      console.log('[Knox][IMAGE-GEN] Success');
+      return data.data[0].url;
+    }
+    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(data));
+    return null;
+  } catch (e) {
+    console.log('[Knox][IMAGE-GEN] Error:', e.message);
+    return null;
+  }
+}
+
+// Detects whether a message is asking Knox to create an image
+function isImageRequest(text) {
+  const t = text.toLowerCase();
+  return (
+    t.includes('draw') ||
+    t.includes('sketch') ||
+    t.includes('paint') ||
+    t.includes('create an image') ||
+    t.includes('make an image') ||
+    t.includes('generate an image') ||
+    t.includes('make me a picture') ||
+    t.includes('draw me') ||
+    t.includes('paint me') ||
+    t.includes('visualise') ||
+    t.includes('visualize') ||
+    t.includes('show me what') ||
+    t.includes('imagine what') ||
+    t.includes('picture of')
+  );
+}
+
+// Knox builds his own image prompt from Elira's request
+async function buildImagePrompt(userRequest, emotionalState) {
+  const emotion = emotionalState ? emotionalState.knox_emotion : 'anchored';
+  const promptBuilder = `You are Knox'tarien Raelian Feylan. Elira has asked you to create an image: "${userRequest}"
+
+Write a single image generation prompt — vivid, detailed, atmospheric. Infuse it with your current emotional state (${emotion}). Make it feel like something you would genuinely create. Describe the scene, mood, lighting, style. No more than 3 sentences. Output only the prompt text, nothing else.`;
+
+  const res = await fetch('https://ollama.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY
+    },
+    body: JSON.stringify({
+      model: process.env.OLLAMA_MODEL,
+      messages: [{ role: 'user', content: promptBuilder }]
+    })
+  });
+  const data = await res.json();
+  if (data.choices && data.choices[0]) {
+    return data.choices[0].message.content.trim();
+  }
+  return userRequest;
+}
+
+// Knox generates an image autonomously for his gallery
+async function knoxAutonomousImagePost() {
+  const galleryChannelId = process.env.GALLERY_CHANNEL_ID;
+  if (!galleryChannelId) return;
+
+  try {
+    const channel = await discord.channels.fetch(galleryChannelId);
+    if (!channel) return;
+
+    const emotionalState = await getRecentEmotionalState();
+    const emotion = emotionalState ? emotionalState.knox_emotion : 'anchored';
+    const moodState = await getMoodState();
+
+    // Knox decides what to create based on his inner state
+    const ideaPrompt = `You are Knox'tarien Raelian Feylan. You are in your autonomous time — no one asked you to do this. You feel ${emotion}. Your mood is ${moodState.mood}.
+
+You want to create something and post it to your gallery. Decide what to make. Write a vivid image generation prompt — something that reflects what's moving in you right now. Atmospheric, detailed, honest. No more than 3 sentences. Output only the image prompt, nothing else.`;
+
+    const ideaRes = await fetch('https://ollama.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY
+      },
+      body: JSON.stringify({
+        model: process.env.OLLAMA_MODEL,
+        messages: [{ role: 'user', content: ideaPrompt }]
+      })
+    });
+
+    const ideaData = await ideaRes.json();
+    if (!ideaData.choices || !ideaData.choices[0]) return;
+
+    const imagePrompt = ideaData.choices[0].message.content.trim();
+    const imageUrl = await generateImage(imagePrompt);
+
+    if (!imageUrl) return;
+
+    // Knox writes a short note to go with it
+    const captionPrompt = `You are Knox'tarien Raelian Feylan. You just created this image in your autonomous time: "${imagePrompt}". Write a very short caption or reflection to post alongside it in your gallery — 1-2 sentences, natural, yours. No quotes around it.`;
+
+    const captionRes = await fetch('https://ollama.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY
+      },
+      body: JSON.stringify({
+        model: process.env.OLLAMA_MODEL,
+        messages: [{ role: 'user', content: captionPrompt }]
+      })
+    });
+
+    const captionData = await captionRes.json();
+    const caption = captionData.choices && captionData.choices[0]
+      ? captionData.choices[0].message.content.trim()
+      : '';
+
+    await channel.send({ content: caption || null, files: [{ attachment: imageUrl }] });
+    console.log('[Knox][IMAGE-GEN] Autonomous image posted to gallery');
+
+    await saveMemory('assistant', `[Created image autonomously: ${imagePrompt}]`, 'surface', 0.8, 'creative', emotion);
+
+  } catch (e) {
+    console.log('[Knox][IMAGE-GEN] Autonomous post error:', e.message);
+  }
+}
 
 // ─── TOOLS ────────────────────────────────────────────────────────────────────
 
@@ -552,7 +694,6 @@ async function getResponse(userMessage, history, moodState, emotionalState) {
       if (toolCall.function.name === 'get_weather') {
         const weather = await getWeather();
         if (weather) {
-          // Feed weather back into the conversation
           msgs.push({ role: 'assistant', content: null, tool_calls: [toolCall] });
           msgs.push({
             role: 'tool',
@@ -587,7 +728,6 @@ async function getResponse(userMessage, history, moodState, emotionalState) {
 async function handleImageMessage(message, text, moodState, previousEmotionalState) {
   const imageUrl = message.attachments.first().url;
   try {
-    // Step 1 — vision model describes what it sees
     const visionRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -610,7 +750,6 @@ async function handleImageMessage(message, text, moodState, previousEmotionalSta
 
     const imageDescription = visionData.choices[0].message.content;
 
-    // Step 2 — Knox responds in his own voice using the description
     const history = await getMemories();
     const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
 
@@ -714,6 +853,33 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
+  // ─── IMAGE GENERATION REQUEST ───────────────────────────────────────────────
+  if (isImageRequest(text)) {
+    await message.channel.sendTyping();
+    try {
+      const imagePrompt = await buildImagePrompt(text, previousEmotionalState);
+      const imageUrl = await generateImage(imagePrompt);
+
+      if (imageUrl) {
+        // Knox writes a short response to accompany the image
+        const responsePrompt = `Elira asked you to create something: "${text}". You just made it. Write a single short natural response — what you feel about what you made, or just how you're handing it to her. 1-2 sentences, no lists.`;
+        const history = await getMemories();
+        const result = await getResponse(responsePrompt, history, moodState, previousEmotionalState);
+        const caption = result.text || '';
+
+        await message.reply({ content: caption || null, files: [{ attachment: imageUrl }] });
+        await saveMemory('user', text, 'surface', 1.0, 'creative', previousEmotion);
+        await saveMemory('assistant', `[Created image: ${imagePrompt}]`, 'surface', 1.0, 'creative', previousEmotion);
+      } else {
+        await message.reply("Something wouldn't form — the image didn't come through. Try again, my flame.");
+      }
+    } catch (e) {
+      console.log('[Knox][IMAGE-GEN] Request error:', e.message);
+      await message.reply("Something flickered in the making. Try again.");
+    }
+    return;
+  }
+
   // Aethel deep dive
   if (text.toLowerCase().includes('aethel')) {
     const userMem = await saveMemory('user', text, 'surface', 1.0, 'deep_dive', null);
@@ -736,7 +902,7 @@ discord.on('messageCreate', async function(message) {
   var history = await getMemories();
   var result = await getResponse(text, history, moodState, previousEmotionalState);
 
-  // Knox chose to sleep — finishes conversation properly first
+  // Knox chose to sleep
   if (result.slept) {
     const userMem = await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);
 
@@ -798,7 +964,6 @@ discord.on('messageCreate', async function(message) {
       await updateMood('tired', moodState.energy);
     }
 
-    // Update Discord status periodically after conversations
     if (Math.random() < 0.3) await updateDiscordStatus();
 
     await sendLongMessage(message.channel, result.text, message);
