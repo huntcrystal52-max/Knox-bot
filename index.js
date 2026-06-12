@@ -441,7 +441,7 @@ async function generateImage(prompt) {
         'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY
       },
       body: JSON.stringify({
-        model: 'stability-ai/stable-diffusion-3',
+        model: 'black-forest-labs/flux.2-klein-4b',
         prompt: prompt,
         n: 1,
         size: '1024x1024'
