@@ -86,25 +86,17 @@ async function writeToNotion(pageId, title, content) {
 async function generateImage(prompt) {
   try {
     console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
-
-    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
-      body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
-    });
-
-    async function generateImage(prompt) {
-  try {
-    console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
     const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
       body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
     });
     const submitData = await submitRes.json();
+    console.log('[Knox][IMAGE-GEN] Submit response:', JSON.stringify(submitData).slice(0, 300));
     if (submitData.images && submitData.images[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return submitData.images[0].url; }
     const requestId = submitData.request_id;
     if (requestId) {
+      console.log('[Knox][IMAGE-GEN] Queued, polling request_id:', requestId);
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 3000));
         const pollRes = await fetch(`https://queue.fal.run/fal-ai/flux/requests/${requestId}`, {
@@ -113,17 +105,11 @@ async function generateImage(prompt) {
         const pollData = await pollRes.json();
         console.log('[Knox][IMAGE-GEN] Poll status:', pollData.status);
         if (pollData.images && pollData.images[0]) { console.log('[Knox][IMAGE-GEN] Success'); return pollData.images[0].url; }
-        if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed'); return null; }
+        if (pollData.status === 'COMPLETED' && pollData.output && pollData.output.images && pollData.output.images[0]) { console.log('[Knox][IMAGE-GEN] Success (output)'); return pollData.output.images[0].url; }
+        if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
       console.log('[Knox][IMAGE-GEN] Timed out');
     }
-    return null;
-  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
-}
-      console.log('[Knox][IMAGE-GEN] Timed out');
-    }
-
-    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(submitData).slice(0, 200));
     return null;
   } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
 }
