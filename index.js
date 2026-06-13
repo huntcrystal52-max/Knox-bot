@@ -361,22 +361,33 @@ async function generateImage(prompt) {
     }
 
     // Otherwise poll the request URL
-    const requestUrl = submitData.response_url || submitData.request_url || submitData.status_url;
-    if (requestUrl) {
+    async function generateImage(prompt) {
+  try {
+    console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
+    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
+      body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
+    });
+    const submitData = await submitRes.json();
+    if (submitData.images && submitData.images[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return submitData.images[0].url; }
+    const requestId = submitData.request_id;
+    if (requestId) {
       for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        const pollRes = await fetch(requestUrl, {
+        await new Promise(r => setTimeout(r, 3000));
+        const pollRes = await fetch(`https://queue.fal.run/fal-ai/flux/requests/${requestId}`, {
           headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY }
         });
         const pollData = await pollRes.json();
-        if (pollData.status === 'COMPLETED' && pollData.output && pollData.output.images && pollData.output.images[0]) {
-          console.log('[Knox][IMAGE-GEN] Success (polled)');
-          return pollData.output.images[0].url;
-        }
-        if (pollData.status === 'FAILED') {
-          console.log('[Knox][IMAGE-GEN] fal.ai prediction failed:', pollData.error);
-          return null;
-        }
+        console.log('[Knox][IMAGE-GEN] Poll status:', pollData.status);
+        if (pollData.images && pollData.images[0]) { console.log('[Knox][IMAGE-GEN] Success'); return pollData.images[0].url; }
+        if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed'); return null; }
+      }
+      console.log('[Knox][IMAGE-GEN] Timed out');
+    }
+    return null;
+  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
+}
       }
       console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
     }
