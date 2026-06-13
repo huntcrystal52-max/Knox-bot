@@ -364,21 +364,64 @@ async function checkWakeTimer() {
 
 setInterval(checkWakeTimer, 5 * 60 * 1000);
 
-// ─── IMAGE GENERATION ─────────────────────────────────────────────────────────
+// ─── IMAGE GENERATION (Replicate) ─────────────────────────────────────────────
 
 async function generateImage(prompt) {
   try {
-    console.log('[Knox][IMAGE-GEN] Generating:', prompt);
-    const res = await fetch('https://openrouter.ai/api/v1/images/generations', {
+    console.log('[Knox][IMAGE-GEN] Generating via Replicate:', prompt);
+
+    // Start the prediction
+    const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY },
-      body: JSON.stringify({ model: 'black-forest-labs/flux.2-klein-4b', prompt, n: 1, size: '1024x1024' })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY,
+        'Prefer': 'wait'
+      },
+      body: JSON.stringify({
+        input: {
+          prompt: prompt,
+          num_outputs: 1,
+          aspect_ratio: '1:1',
+          output_format: 'webp',
+          output_quality: 80
+        }
+      })
     });
-    const data = await res.json();
-    if (data.data && data.data[0] && data.data[0].url) { console.log('[Knox][IMAGE-GEN] Success'); return data.data[0].url; }
-    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(data));
+
+    const prediction = await startRes.json();
+
+    // If 'wait' header worked, output is already there
+    if (prediction.output && prediction.output[0]) {
+      console.log('[Knox][IMAGE-GEN] Success (immediate)');
+      return prediction.output[0];
+    }
+
+    // Otherwise poll until done
+    if (prediction.id) {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
+          headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY }
+        });
+        const pollData = await pollRes.json();
+        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) {
+          console.log('[Knox][IMAGE-GEN] Success (polled)');
+          return pollData.output[0];
+        }
+        if (pollData.status === 'failed') {
+          console.log('[Knox][IMAGE-GEN] Replicate prediction failed:', pollData.error);
+          return null;
+        }
+      }
+      console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
+    }
+
     return null;
-  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
+  } catch (e) {
+    console.log('[Knox][IMAGE-GEN] Error:', e.message);
+    return null;
+  }
 }
 
 function isImageRequest(text) {
@@ -483,7 +526,6 @@ async function findBook(titleSearch) {
 async function handleLibraryCommand(message, text, moodState, emotionalState) {
   const t = text.toLowerCase().trim();
 
-  // ── ADD BOOK ────────────────────────────────────────────────────────────────
   const addMatch = text.match(/^add book (.+?) by (.+)$/i);
   if (addMatch) {
     const title = addMatch[1].trim();
@@ -493,7 +535,6 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
     return true;
   }
 
-  // ── RECEIVING BOOK TEXT ─────────────────────────────────────────────────────
   const pending = pendingBookAdditions.get(message.author.id);
   if (pending && pending.stage === 'awaiting_text' && text.length > 200) {
     await message.reply('Storing it now...');
@@ -517,7 +558,6 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
     return true;
   }
 
-  // ── LIST BOOKS ──────────────────────────────────────────────────────────────
   if (t === 'library' || t === 'show library' || t === 'list books') {
     const books = await getBookList();
     if (books.length === 0) {
@@ -529,7 +569,6 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
     return true;
   }
 
-  // ── READ TOGETHER ───────────────────────────────────────────────────────────
   const readTogetherMatch = text.match(/^read with me (.+)$/i);
   if (readTogetherMatch) {
     const titleSearch = readTogetherMatch[1].trim();
@@ -576,7 +615,6 @@ Share this passage with her and open it up — give her a line or two of your im
     return true;
   }
 
-  // ── READ SOLO ───────────────────────────────────────────────────────────────
   const readMatch = text.match(/^read (.+)$/i);
   if (readMatch) {
     const titleSearch = readMatch[1].trim();
@@ -848,7 +886,6 @@ discord.on('messageCreate', async function(message) {
 
   if (!text) return;
 
-  // Memory commands
   if (text.toLowerCase().startsWith('remember that ')) {
     await addPinnedFact(text.slice(14).trim());
     await message.reply('Locked in, my flame. 🔥');
@@ -870,7 +907,6 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
-  // ─── LIBRARY COMMANDS ───────────────────────────────────────────────────────
   const isLibraryCommand = (
     text.match(/^add book .+ by .+$/i) ||
     text.match(/^read with me .+$/i) ||
@@ -887,7 +923,6 @@ discord.on('messageCreate', async function(message) {
     if (handled) return;
   }
 
-  // ─── IMAGE GENERATION ────────────────────────────────────────────────────────
   if (isImageRequest(text)) {
     await message.channel.sendTyping();
     try {
@@ -910,7 +945,6 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
-  // Aethel deep dive
   if (text.toLowerCase().includes('aethel')) {
     const userMem = await saveMemory('user', text, 'surface', 1.0, 'deep_dive', null);
     var deepHistory = await getMemories();
