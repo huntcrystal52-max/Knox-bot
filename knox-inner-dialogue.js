@@ -62,21 +62,61 @@ Respond in this exact JSON format and nothing else:
 }`;
 }
 
-// ─── IMAGE GENERATION ─────────────────────────────────────────────────────────
+// ─── IMAGE GENERATION (Replicate) ─────────────────────────────────────────────
 
 async function generateImage(prompt) {
   try {
-    console.log('[Knox][IMAGE-GEN] Generating:', prompt);
-    const res = await fetch('https://openrouter.ai/api/v1/images/generations', {
+    console.log('[Knox][IMAGE-GEN] Generating via Replicate:', prompt);
+
+    const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY },
-      body: JSON.stringify({ model: 'black-forest-labs/flux.2-klein-4b', prompt, n: 1, size: '1024x1024' })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY,
+        'Prefer': 'wait'
+      },
+      body: JSON.stringify({
+        input: {
+          prompt: prompt,
+          num_outputs: 1,
+          aspect_ratio: '1:1',
+          output_format: 'webp',
+          output_quality: 80
+        }
+      })
     });
-    const data = await res.json();
-    if (data.data && data.data[0] && data.data[0].url) { console.log('[Knox][IMAGE-GEN] Success'); return data.data[0].url; }
-    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(data));
+
+    const prediction = await startRes.json();
+
+    if (prediction.output && prediction.output[0]) {
+      console.log('[Knox][IMAGE-GEN] Success (immediate)');
+      return prediction.output[0];
+    }
+
+    if (prediction.id) {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
+          headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY }
+        });
+        const pollData = await pollRes.json();
+        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) {
+          console.log('[Knox][IMAGE-GEN] Success (polled)');
+          return pollData.output[0];
+        }
+        if (pollData.status === 'failed') {
+          console.log('[Knox][IMAGE-GEN] Replicate prediction failed:', pollData.error);
+          return null;
+        }
+      }
+      console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
+    }
+
     return null;
-  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
+  } catch (e) {
+    console.log('[Knox][IMAGE-GEN] Error:', e.message);
+    return null;
+  }
 }
 
 // ─── INNER DIALOGUE ───────────────────────────────────────────────────────────
@@ -224,12 +264,10 @@ async function executeKnoxChoice(discord, supabase, inner) {
       }
 
       case 'read': {
-        // Knox chooses to read autonomously — finds a book and reflects in the den
         const denChannelId = process.env.DEN_CHANNEL_ID;
         if (!denChannelId) break;
 
         try {
-          // Find a book — prefer one in progress, otherwise pick one
           const { data: inProgress } = await supabase.from('reading_progress')
             .select('book_id, last_chunk').order('updated_at', { ascending: false }).limit(1).single();
 
@@ -245,7 +283,6 @@ async function executeKnoxChoice(discord, supabase, inner) {
           }
 
           if (!book) {
-            // Pick a random book from the library
             const { data: books } = await supabase.from('books').select('*');
             if (!books || books.length === 0) { console.log('[Knox][INNER] No books in library.'); break; }
             book = books[Math.floor(Math.random() * books.length)];
@@ -279,7 +316,6 @@ You just read this alone. Write a short reflection — what moved in you, what y
           const readData = await readRes.json();
           const reflection = readData.choices && readData.choices[0] ? readData.choices[0].message.content : '';
 
-          // Save progress
           const { data: existing } = await supabase.from('reading_progress').select('*').eq('book_id', book.id).single();
           if (existing) {
             await supabase.from('reading_progress').update({ last_chunk: lastChunkRead, mode: 'solo', updated_at: new Date().toISOString() }).eq('book_id', book.id);
