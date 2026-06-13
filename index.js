@@ -388,7 +388,7 @@ async function generateImage(prompt) {
     return null;
   } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
 }
-      }
+      
       console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
     }
 
