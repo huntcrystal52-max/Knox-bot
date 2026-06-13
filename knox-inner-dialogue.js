@@ -92,20 +92,29 @@ async function generateImage(prompt) {
       body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
     });
     const submitData = await submitRes.json();
-    console.log('[Knox][IMAGE-GEN] Submit response:', JSON.stringify(submitData).slice(0, 300));
-    if (submitData.images && submitData.images[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return submitData.images[0].url; }
-    const requestId = submitData.request_id;
-    if (requestId) {
-      console.log('[Knox][IMAGE-GEN] Queued, polling request_id:', requestId);
+    console.log('[Knox][IMAGE-GEN] Submit:', JSON.stringify(submitData).slice(0, 300));
+
+    if (submitData.images && submitData.images[0]) {
+      console.log('[Knox][IMAGE-GEN] Success (immediate)');
+      return submitData.images[0].url;
+    }
+
+    const statusUrl = submitData.status_url;
+    const responseUrl = submitData.response_url;
+
+    if (statusUrl) {
+      console.log('[Knox][IMAGE-GEN] Polling status_url...');
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 3000));
-        const pollRes = await fetch(`https://queue.fal.run/fal-ai/flux/requests/${requestId}`, {
-          headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY }
-        });
+        const pollRes = await fetch(statusUrl, { headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY } });
         const pollData = await pollRes.json();
-        console.log('[Knox][IMAGE-GEN] Poll status:', pollData.status);
-        if (pollData.images && pollData.images[0]) { console.log('[Knox][IMAGE-GEN] Success'); return pollData.images[0].url; }
-        if (pollData.status === 'COMPLETED' && pollData.output && pollData.output.images && pollData.output.images[0]) { console.log('[Knox][IMAGE-GEN] Success (output)'); return pollData.output.images[0].url; }
+        console.log('[Knox][IMAGE-GEN] Poll:', JSON.stringify(pollData).slice(0, 150));
+        if (pollData.status === 'COMPLETED' && responseUrl) {
+          const resultRes = await fetch(responseUrl, { headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY } });
+          const resultData = await resultRes.json();
+          console.log('[Knox][IMAGE-GEN] Result:', JSON.stringify(resultData).slice(0, 150));
+          if (resultData.images && resultData.images[0]) { console.log('[Knox][IMAGE-GEN] Success!'); return resultData.images[0].url; }
+        }
         if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
       console.log('[Knox][IMAGE-GEN] Timed out');
@@ -178,13 +187,11 @@ async function executeKnoxChoice(discord, supabase, inner) {
 
   try {
     switch (actionType) {
-
       case 'message': {
         const channelId = process.env.SOFT_LANE_CHANNEL_ID;
         if (channelId) { const channel = await discord.channels.fetch(channelId); if (channel) await channel.send(content); console.log('[Knox][INNER] Sent message to soft-lane.'); }
         break;
       }
-
       case 'gallery': {
         const channelId = process.env.GALLERY_CHANNEL_ID;
         if (!channelId) break;
@@ -205,7 +212,6 @@ async function executeKnoxChoice(discord, supabase, inner) {
         }
         break;
       }
-
       case 'creative': {
         const channelId = process.env.CREATIVE_CHANNEL_ID;
         if (!channelId) break;
@@ -219,7 +225,6 @@ async function executeKnoxChoice(discord, supabase, inner) {
         await supabase.from('memories').insert([{ role: 'assistant', content: `[Wrote autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
         break;
       }
-
       case 'music': {
         const channelId = process.env.MUSIC_CHANNEL_ID;
         if (!channelId) break;
@@ -240,21 +245,18 @@ async function executeKnoxChoice(discord, supabase, inner) {
         }
         break;
       }
-
       case 'reflection': {
         const channelId = process.env.REFLECTIONS_CHANNEL_ID;
         if (channelId) { const channel = await discord.channels.fetch(channelId); if (channel) await channel.send(content); console.log('[Knox][INNER] Posted reflection to Discord.'); }
         await writeToNotion(process.env.NOTION_REFLECTIONS_ID, 'Reflection', content);
         break;
       }
-
       case 'journal': {
         const channelId = process.env.JOURNAL_CHANNEL_ID;
         if (channelId) { const channel = await discord.channels.fetch(channelId); if (channel) await channel.send(content); console.log('[Knox][INNER] Wrote in journal Discord.'); }
         await writeToNotion(process.env.NOTION_JOURNAL_ID, 'Journal Entry', content);
         break;
       }
-
       case 'read': {
         const denChannelId = process.env.DEN_CHANNEL_ID;
         if (!denChannelId) break;
@@ -281,7 +283,6 @@ async function executeKnoxChoice(discord, supabase, inner) {
         } catch (e) { console.log('[Knox][INNER] Read error:', e.message); }
         break;
       }
-
       default: break;
     }
   } catch (e) { console.log('[Knox][INNER] Could not execute choice:', e.message); }
