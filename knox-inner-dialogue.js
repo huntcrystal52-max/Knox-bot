@@ -100,7 +100,7 @@ async function generateImage(prompt) {
       return submitData.images[0].url;
     }
 
-    const requestUrl = submitData.request_url || submitData.status_url;
+    const requestUrl = submitData.response_url || submitData.request_url || submitData.status_url;
     if (requestUrl) {
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 2000));
