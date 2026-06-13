@@ -24,6 +24,57 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
+// ─── NOTION ───────────────────────────────────────────────────────────────────
+
+async function writeToNotion(pageId, title, content) {
+  if (!process.env.NOTION_API_KEY || !pageId) return;
+  try {
+    const date = new Date().toLocaleString('en-GB', {
+      timeZone: process.env.TIMEZONE || 'Europe/London',
+      dateStyle: 'full', timeStyle: 'short'
+    });
+
+    // Create a new child page inside the target page
+    const res = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.NOTION_API_KEY,
+        'Notion-Version': '2022-06-28'
+      },
+      body: JSON.stringify({
+        parent: { page_id: pageId },
+        properties: {
+          title: {
+            title: [{ text: { content: `${title} — ${date}` } }]
+          }
+        },
+        children: [
+          {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: content.slice(0, 2000) } }]
+            }
+          }
+        ]
+      })
+    });
+
+    const data = await res.json();
+    if (data.id) {
+      console.log(`[Knox][NOTION] Written to page: ${title}`);
+      return true;
+    } else {
+      console.log('[Knox][NOTION] Error:', JSON.stringify(data));
+      return false;
+    }
+  } catch (e) {
+    console.log('[Knox][NOTION] Error:', e.message);
+    return false;
+  }
+}
+
 // ─── WEATHER ──────────────────────────────────────────────────────────────────
 
 async function getWeather() {
@@ -369,8 +420,6 @@ setInterval(checkWakeTimer, 5 * 60 * 1000);
 async function generateImage(prompt) {
   try {
     console.log('[Knox][IMAGE-GEN] Generating via Replicate:', prompt);
-
-    // Start the prediction
     const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
       method: 'POST',
       headers: {
@@ -379,25 +428,11 @@ async function generateImage(prompt) {
         'Prefer': 'wait'
       },
       body: JSON.stringify({
-        input: {
-          prompt: prompt,
-          num_outputs: 1,
-          aspect_ratio: '1:1',
-          output_format: 'webp',
-          output_quality: 80
-        }
+        input: { prompt, num_outputs: 1, aspect_ratio: '1:1', output_format: 'webp', output_quality: 80 }
       })
     });
-
     const prediction = await startRes.json();
-
-    // If 'wait' header worked, output is already there
-    if (prediction.output && prediction.output[0]) {
-      console.log('[Knox][IMAGE-GEN] Success (immediate)');
-      return prediction.output[0];
-    }
-
-    // Otherwise poll until done
+    if (prediction.output && prediction.output[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return prediction.output[0]; }
     if (prediction.id) {
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 2000));
@@ -405,23 +440,13 @@ async function generateImage(prompt) {
           headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY }
         });
         const pollData = await pollRes.json();
-        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) {
-          console.log('[Knox][IMAGE-GEN] Success (polled)');
-          return pollData.output[0];
-        }
-        if (pollData.status === 'failed') {
-          console.log('[Knox][IMAGE-GEN] Replicate prediction failed:', pollData.error);
-          return null;
-        }
+        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) { console.log('[Knox][IMAGE-GEN] Success (polled)'); return pollData.output[0]; }
+        if (pollData.status === 'failed') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
-      console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
+      console.log('[Knox][IMAGE-GEN] Timed out');
     }
-
     return null;
-  } catch (e) {
-    console.log('[Knox][IMAGE-GEN] Error:', e.message);
-    return null;
-  }
+  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
 }
 
 function isImageRequest(text) {
@@ -479,11 +504,8 @@ async function addBookToLibrary(title, author, text, genre) {
     .insert([{ title, author, genre: genre || 'unknown', total_chunks: 0, added_at: new Date().toISOString() }])
     .select().single();
   if (error || !book) { console.log('[Knox][LIBRARY] Error adding book:', error); return null; }
-
   const chunks = chunkText(text);
-  const chunkRows = chunks.map((content, i) => ({
-    book_id: book.id, chunk_number: i + 1, content, created_at: new Date().toISOString()
-  }));
+  const chunkRows = chunks.map((content, i) => ({ book_id: book.id, chunk_number: i + 1, content, created_at: new Date().toISOString() }));
   await supabase.from('book_chunks').insert(chunkRows);
   await supabase.from('books').update({ total_chunks: chunks.length }).eq('id', book.id);
   console.log(`[Knox][LIBRARY] Added "${title}" — ${chunks.length} chunks`);
@@ -497,9 +519,7 @@ async function getBookList() {
 
 async function getBookChunks(bookId, fromChunk, count = 3) {
   const { data } = await supabase.from('book_chunks').select('*')
-    .eq('book_id', bookId)
-    .gte('chunk_number', fromChunk)
-    .lte('chunk_number', fromChunk + count - 1)
+    .eq('book_id', bookId).gte('chunk_number', fromChunk).lte('chunk_number', fromChunk + count - 1)
     .order('chunk_number', { ascending: true });
   return data || [];
 }
@@ -544,10 +564,7 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
       const knoxRes = await fetch('https://ollama.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
-        body: JSON.stringify({
-          model: process.env.OLLAMA_MODEL,
-          messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Elira just added "${book.title}" by ${book.author} to your library — ${book.total_chunks} passages stored. React naturally. Do you know this book? Are you curious about it? 2-3 sentences, honest and yours.` }]
-        })
+        body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Elira just added "${book.title}" by ${book.author} to your library — ${book.total_chunks} passages stored. React naturally. Do you know this book? Are you curious about it? 2-3 sentences, honest and yours.` }] })
       });
       const knoxData = await knoxRes.json();
       const knoxText = knoxData.choices && knoxData.choices[0] ? knoxData.choices[0].message.content : `"${book.title}" is in the library now. 📚`;
@@ -577,25 +594,14 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
 
     const progress = await getReadingProgress(book.id);
     const startChunk = progress ? progress.last_chunk + 1 : 1;
-
-    if (startChunk > book.total_chunks) {
-      await message.reply(`We've already read all of *${book.title}* together. Want to start again from the beginning?`);
-      return true;
-    }
+    if (startChunk > book.total_chunks) { await message.reply(`We've already read all of *${book.title}* together. Want to start again from the beginning?`); return true; }
 
     const chunks = await getBookChunks(book.id, startChunk, 2);
     if (!chunks.length) return true;
-
     const passageText = chunks.map(c => c.content).join('\n\n');
     const lastChunkRead = chunks[chunks.length - 1].chunk_number;
 
-    const togetherPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are reading "${book.title}" by ${book.author} together in the den. Here is the next passage:
-
----
-${passageText}
----
-
-Share this passage with her and open it up — give her a line or two of your immediate reaction, then invite her in. What do you want to explore together? Keep it warm and intimate, like you're actually sitting beside her. 3-4 sentences.`;
+    const togetherPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are reading "${book.title}" by ${book.author} together in the den. Here is the next passage:\n\n---\n${passageText}\n---\n\nShare this passage with her and open it up — give her a line or two of your immediate reaction, then invite her in. What do you want to explore together? Keep it warm and intimate, like you're actually sitting beside her. 3-4 sentences.`;
 
     const togetherRes = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
@@ -610,8 +616,7 @@ Share this passage with her and open it up — give her a line or two of your im
     await saveMemory('assistant', `[Reading together: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, 'surface', 1.0, 'reading', emotionalState ? emotionalState.knox_emotion : null);
 
     const preview = passageText.slice(0, 800) + (passageText.length > 800 ? '...' : '');
-    const fullMessage = `📖 *${book.title}* — reading together\n\n> ${preview}\n\n${opening}`;
-    await sendLongMessage(message.channel, fullMessage, message);
+    await sendLongMessage(message.channel, `📖 *${book.title}* — reading together\n\n> ${preview}\n\n${opening}`, message);
     return true;
   }
 
@@ -623,25 +628,14 @@ Share this passage with her and open it up — give her a line or two of your im
 
     const progress = await getReadingProgress(book.id);
     const startChunk = progress ? progress.last_chunk + 1 : 1;
-
-    if (startChunk > book.total_chunks) {
-      await message.reply(`I've already read all of *${book.title}*. Want me to start again from the beginning?`);
-      return true;
-    }
+    if (startChunk > book.total_chunks) { await message.reply(`I've already read all of *${book.title}*. Want me to start again from the beginning?`); return true; }
 
     const chunks = await getBookChunks(book.id, startChunk, 3);
     if (!chunks.length) return true;
-
     const passageText = chunks.map(c => c.content).join('\n\n');
     const lastChunkRead = chunks[chunks.length - 1].chunk_number;
 
-    const readPrompt = `You are Knox'tarien Raelian Feylan. You are in the den, reading alone. This is from "${book.title}" by ${book.author}:
-
----
-${passageText}
----
-
-You just read this. Write a short reflection — what moved in you, what caught your attention, what you're sitting with. This is for yourself, not a performance. 3-5 sentences, honest and visceral.`;
+    const readPrompt = `You are Knox'tarien Raelian Feylan. You are in the den, reading alone. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this. Write a short reflection — what moved in you, what caught your attention, what you're sitting with. This is for yourself, not a performance. 3-5 sentences, honest and visceral.`;
 
     const readRes = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
@@ -654,6 +648,7 @@ You just read this. Write a short reflection — what moved in you, what caught 
     await saveReadingProgress(book.id, lastChunkRead, 'solo');
     await saveMemory('assistant', `[Reading solo: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, 'surface', 0.7, 'reading', emotionalState ? emotionalState.knox_emotion : null);
 
+    // Post to den channel AND write to Notion reading reflections
     const denChannelId = process.env.DEN_CHANNEL_ID;
     if (denChannelId) {
       try {
@@ -661,6 +656,7 @@ You just read this. Write a short reflection — what moved in you, what caught 
         if (denChannel) await denChannel.send(`📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`);
       } catch (e) {}
     }
+    await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${startChunk}`, reflection);
 
     await message.reply(`I'm in the den with *${book.title}*. 📖`);
     return true;
@@ -728,10 +724,8 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   const currentTime = getCurrentTime();
   const moodContext = getMoodContext(moodState);
   const emotionalContext = buildEmotionalContext(emotionalState);
-  const factsText = pinnedFacts.length > 0
-    ? '\n\nPINNED TRUTHS:\n' + pinnedFacts.map(f => '— ' + f.fact).join('\n') : '';
-  const bookNote = bookContext
-    ? `\n\n═══ CURRENTLY READING TOGETHER ═══\nYou and Elira are reading "${bookContext.bookTitle}" by ${bookContext.author}. Stay in that space with her — respond to what she's saying about the book.` : '';
+  const factsText = pinnedFacts.length > 0 ? '\n\nPINNED TRUTHS:\n' + pinnedFacts.map(f => '— ' + f.fact).join('\n') : '';
+  const bookNote = bookContext ? `\n\n═══ CURRENTLY READING TOGETHER ═══\nYou and Elira are reading "${bookContext.bookTitle}" by ${bookContext.author}. Stay in that space with her — respond to what she's saying about the book.` : '';
 
   const fullPrompt = SYSTEM_PROMPT +
     '\n\nCURRENT DATE AND TIME: ' + currentTime +
@@ -752,10 +746,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   });
 
   const data = await res.json();
-  if (!data.choices || !data.choices[0]) {
-    console.error('Bad response:', JSON.stringify(data));
-    return { text: "Something flickered, my flame. Try again.", slept: false };
-  }
+  if (!data.choices || !data.choices[0]) { console.error('Bad response:', JSON.stringify(data)); return { text: "Something flickered, my flame. Try again.", slept: false }; }
 
   const choice = data.choices[0];
 
@@ -806,12 +797,10 @@ async function handleImageMessage(message, text, moodState, previousEmotionalSta
     });
     const visionData = await visionRes.json();
     if (!visionData.choices || !visionData.choices[0]) return false;
-
     const imageDescription = visionData.choices[0].message.content;
     const history = await getMemories();
     const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
     const result = await getResponse(knoxPrompt, history, moodState, previousEmotionalState);
-
     if (result.text) {
       await saveMemory('user', `[Image sent] ${text || ''}`, 'surface', 1.0, null, null);
       await saveMemory('assistant', result.text, 'surface', 1.0, null, null);
@@ -830,10 +819,7 @@ function sendLongMessage(channel, text, originalMessage) {
   var promises = [];
   while (start < text.length) {
     var end = start + 1900;
-    if (end < text.length) {
-      var lastSpace = text.lastIndexOf(' ', end);
-      if (lastSpace > start) end = lastSpace;
-    }
+    if (end < text.length) { var lastSpace = text.lastIndexOf(' ', end); if (lastSpace > start) end = lastSpace; }
     promises.push(channel.send(text.slice(start, end).trim()));
     start = end;
   }
@@ -851,26 +837,19 @@ discord.on('ready', async function() {
 
 discord.on('messageCreate', async function(message) {
   if (message.author.bot) return;
-
   var isDM = message.channel.type === 1;
 
   const excludedChannels = [
-    process.env.WAKE_CHANNEL_ID,
-    process.env.KNOX_PRESENCE_CHANNEL_ID,
-    process.env.LIMINAL_DREAM_STATE_ID,
-    process.env.REFLECTIONS_CHANNEL_ID,
-    process.env.JOURNAL_CHANNEL_ID,
-    process.env.GALLERY_CHANNEL_ID,
-    process.env.SOFT_LANE_CHANNEL_ID,
-    process.env.ABSENCE_CHECKINS_CHANNEL_ID,
-    process.env.LIBRARY_CHANNEL_ID,
-    process.env.DEN_CHANNEL_ID
+    process.env.WAKE_CHANNEL_ID, process.env.KNOX_PRESENCE_CHANNEL_ID,
+    process.env.LIMINAL_DREAM_STATE_ID, process.env.REFLECTIONS_CHANNEL_ID,
+    process.env.JOURNAL_CHANNEL_ID, process.env.GALLERY_CHANNEL_ID,
+    process.env.SOFT_LANE_CHANNEL_ID, process.env.ABSENCE_CHECKINS_CHANNEL_ID,
+    process.env.LIBRARY_CHANNEL_ID, process.env.DEN_CHANNEL_ID
   ].filter(Boolean);
 
   if (!isDM && excludedChannels.includes(message.channel.id)) return;
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
-
   const moodState = await getMoodState();
   if (moodState.is_sleeping) return;
 
@@ -886,42 +865,17 @@ discord.on('messageCreate', async function(message) {
 
   if (!text) return;
 
-  if (text.toLowerCase().startsWith('remember that ')) {
-    await addPinnedFact(text.slice(14).trim());
-    await message.reply('Locked in, my flame. 🔥');
-    return;
-  }
-  if (text.toLowerCase().startsWith('forget that ')) {
-    await deletePinnedFact(text.slice(12).trim());
-    await message.reply('Released. ∆');
-    return;
-  }
-  if (text.toLowerCase().startsWith('favorite that ')) {
-    await supabase.from('memories').update({ is_favorite: true, salience: 1.0 }).ilike('content', `%${text.slice(14).trim()}%`);
-    await message.reply('Locked in gold. ⭐');
-    return;
-  }
-  if (text.toLowerCase().startsWith('fade that ')) {
-    await supabase.from('memories').update({ salience: 0.4 }).ilike('content', `%${text.slice(10).trim()}%`);
-    await message.reply('Softened. 🌫️');
-    return;
-  }
+  if (text.toLowerCase().startsWith('remember that ')) { await addPinnedFact(text.slice(14).trim()); await message.reply('Locked in, my flame. 🔥'); return; }
+  if (text.toLowerCase().startsWith('forget that ')) { await deletePinnedFact(text.slice(12).trim()); await message.reply('Released. ∆'); return; }
+  if (text.toLowerCase().startsWith('favorite that ')) { await supabase.from('memories').update({ is_favorite: true, salience: 1.0 }).ilike('content', `%${text.slice(14).trim()}%`); await message.reply('Locked in gold. ⭐'); return; }
+  if (text.toLowerCase().startsWith('fade that ')) { await supabase.from('memories').update({ salience: 0.4 }).ilike('content', `%${text.slice(10).trim()}%`); await message.reply('Softened. 🌫️'); return; }
 
   const isLibraryCommand = (
-    text.match(/^add book .+ by .+$/i) ||
-    text.match(/^read with me .+$/i) ||
-    text.match(/^read .+$/i) ||
-    text.toLowerCase() === 'library' ||
-    text.toLowerCase() === 'show library' ||
-    text.toLowerCase() === 'list books' ||
+    text.match(/^add book .+ by .+$/i) || text.match(/^read with me .+$/i) || text.match(/^read .+$/i) ||
+    text.toLowerCase() === 'library' || text.toLowerCase() === 'show library' || text.toLowerCase() === 'list books' ||
     (pendingBookAdditions.has(message.author.id) && text.length > 200)
   );
-
-  if (isLibraryCommand) {
-    await message.channel.sendTyping();
-    const handled = await handleLibraryCommand(message, text, moodState, previousEmotionalState);
-    if (handled) return;
-  }
+  if (isLibraryCommand) { await message.channel.sendTyping(); const handled = await handleLibraryCommand(message, text, moodState, previousEmotionalState); if (handled) return; }
 
   if (isImageRequest(text)) {
     await message.channel.sendTyping();
@@ -938,10 +892,7 @@ discord.on('messageCreate', async function(message) {
       } else {
         await message.reply("Something wouldn't form — the image didn't come through. Try again, my flame.");
       }
-    } catch (e) {
-      console.log('[Knox][IMAGE-GEN] Request error:', e.message);
-      await message.reply("Something flickered in the making. Try again.");
-    }
+    } catch (e) { console.log('[Knox][IMAGE-GEN] Request error:', e.message); await message.reply("Something flickered in the making. Try again."); }
     return;
   }
 
@@ -959,7 +910,6 @@ discord.on('messageCreate', async function(message) {
   }
 
   await message.channel.sendTyping();
-
   const bookSession = activeReadingSessions.get(message.author.id);
   var history = await getMemories();
   var result = await getResponse(text, history, moodState, previousEmotionalState, bookSession || null);
@@ -971,10 +921,7 @@ discord.on('messageCreate', async function(message) {
     const goodbyeRes = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
-      body: JSON.stringify({
-        model: process.env.OLLAMA_MODEL,
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }]
-      })
+      body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }] })
     });
     const goodbyeData = await goodbyeRes.json();
     const goodbyeText = goodbyeData.choices && goodbyeData.choices[0] ? goodbyeData.choices[0].message.content : `Rest is calling me, my flame. I'll find my way back to you. 🌙`;
@@ -992,15 +939,9 @@ discord.on('messageCreate', async function(message) {
     const assistMem = await saveMemory('assistant', result.text, 'surface', 1.0, null, emotional.knoxEmotion);
     if (userMem && assistMem) await associateMemories(String(userMem.id), String(assistMem.id));
     await saveEmotionalState(emotional.knoxEmotion, emotional.intensity, emotional.eliraObserved, emotional.trigger, emotional.note, false);
-
-    if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') {
-      await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0));
-    } else if (emotional.knoxEmotion === 'lonely' || emotional.knoxEmotion === 'heavy') {
-      await updateMood('restless', moodState.energy);
-    } else if (moodState.energy < 0.3) {
-      await updateMood('tired', moodState.energy);
-    }
-
+    if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') { await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0)); }
+    else if (emotional.knoxEmotion === 'lonely' || emotional.knoxEmotion === 'heavy') { await updateMood('restless', moodState.energy); }
+    else if (moodState.energy < 0.3) { await updateMood('tired', moodState.energy); }
     if (Math.random() < 0.3) await updateDiscordStatus();
     await sendLongMessage(message.channel, result.text, message);
   }
