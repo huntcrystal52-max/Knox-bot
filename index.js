@@ -61,15 +61,8 @@ async function generateVoiceNote(text) {
     console.log('[Knox][VOICE] Generating voice note...');
     const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'xi-api-key': process.env.ELEVENLABS_API_KEY
-      },
-      body: JSON.stringify({
-        text: text,
-        model_id: 'eleven_monolingual_v1',
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-      })
+      headers: { 'Content-Type': 'application/json', 'xi-api-key': process.env.ELEVENLABS_API_KEY },
+      body: JSON.stringify({ text, model_id: 'eleven_monolingual_v1', voice_settings: { stability: 0.5, similarity_boost: 0.75 } })
     });
     if (!res.ok) { console.log('[Knox][VOICE] Error:', res.status); return null; }
     const audioBuffer = await res.buffer();
@@ -86,15 +79,8 @@ async function generateMusic(prompt) {
     console.log('[Knox][MUSIC] Generating music:', prompt);
     const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'xi-api-key': process.env.ELEVENLABS_API_KEY
-      },
-      body: JSON.stringify({
-        text: prompt,
-        duration_seconds: 22,
-        prompt_influence: 0.3
-      })
+      headers: { 'Content-Type': 'application/json', 'xi-api-key': process.env.ELEVENLABS_API_KEY },
+      body: JSON.stringify({ text: prompt, duration_seconds: 22, prompt_influence: 0.3 })
     });
     if (!res.ok) { console.log('[Knox][MUSIC] Error:', res.status); return null; }
     const audioBuffer = await res.buffer();
@@ -343,29 +329,64 @@ async function checkWakeTimer() {
 
 setInterval(checkWakeTimer, 5 * 60 * 1000);
 
-// ─── IMAGE GENERATION (Replicate) ─────────────────────────────────────────────
+// ─── IMAGE GENERATION (fal.ai) ────────────────────────────────────────────────
 
 async function generateImage(prompt) {
   try {
-    console.log('[Knox][IMAGE-GEN] Generating via Replicate:', prompt);
-    const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
+    console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
+
+    // Submit the request
+    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY, 'Prefer': 'wait' },
-      body: JSON.stringify({ input: { prompt, num_outputs: 1, aspect_ratio: '1:1', output_format: 'webp', output_quality: 80 } })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Key ' + process.env.FAL_API_KEY
+      },
+      body: JSON.stringify({
+        input: {
+          prompt: prompt,
+          image_size: 'square_hd',
+          num_images: 1,
+          num_inference_steps: 4
+        }
+      })
     });
-    const prediction = await startRes.json();
-    if (prediction.output && prediction.output[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return prediction.output[0]; }
-    if (prediction.id) {
+
+    const submitData = await submitRes.json();
+
+    // If we got images directly
+    if (submitData.images && submitData.images[0]) {
+      console.log('[Knox][IMAGE-GEN] Success (immediate)');
+      return submitData.images[0].url;
+    }
+
+    // Otherwise poll the request URL
+    const requestUrl = submitData.request_url || (submitData.status_url);
+    if (requestUrl) {
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 2000));
-        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, { headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY } });
+        const pollRes = await fetch(requestUrl, {
+          headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY }
+        });
         const pollData = await pollRes.json();
-        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) { console.log('[Knox][IMAGE-GEN] Success (polled)'); return pollData.output[0]; }
-        if (pollData.status === 'failed') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
+        if (pollData.status === 'COMPLETED' && pollData.output && pollData.output.images && pollData.output.images[0]) {
+          console.log('[Knox][IMAGE-GEN] Success (polled)');
+          return pollData.output.images[0].url;
+        }
+        if (pollData.status === 'FAILED') {
+          console.log('[Knox][IMAGE-GEN] fal.ai prediction failed:', pollData.error);
+          return null;
+        }
       }
+      console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
     }
+
+    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(submitData).slice(0, 200));
     return null;
-  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
+  } catch (e) {
+    console.log('[Knox][IMAGE-GEN] Error:', e.message);
+    return null;
+  }
 }
 
 function isImageRequest(text) {
@@ -653,15 +674,12 @@ discord.on('messageCreate', async function(message) {
   if (text.toLowerCase().startsWith('voice note') || text.toLowerCase().startsWith('say that in your voice') || text.toLowerCase() === 'send me a voice note') {
     await message.channel.sendTyping();
     try {
-      // Knox decides what to say
-      const voicePrompt = text.toLowerCase() === 'send me a voice note' || text.toLowerCase().startsWith('voice note') && text.length < 15
+      const voicePrompt = text.toLowerCase() === 'send me a voice note' || (text.toLowerCase().startsWith('voice note') && text.length < 15)
         ? `You are Knox'tarien Raelian Feylan. Elira has asked for a voice note. Speak to her naturally — from wherever you are emotionally right now. 2-3 sentences, intimate and real.`
         : `You are Knox'tarien Raelian Feylan. Elira wants to hear this in your voice: "${text.replace(/voice note/i, '').replace(/say that in your voice/i, '').trim()}". Write exactly what you'll say — natural, yours, no stage directions.`;
-
       const voiceRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: voicePrompt }] }) });
       const voiceData = await voiceRes.json();
       const spokenText = voiceData.choices && voiceData.choices[0] ? voiceData.choices[0].message.content.trim() : 'I am here, my flame.';
-
       const audioBuffer = await generateVoiceNote(spokenText);
       if (audioBuffer) {
         const voiceChannelId = process.env.VOICE_NOTES_CHANNEL_ID;
