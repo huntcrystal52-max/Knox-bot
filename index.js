@@ -335,44 +335,25 @@ async function generateImage(prompt) {
   try {
     console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
 
-    // Submit the request
-    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Key ' + process.env.FAL_API_KEY
-      },
-      body: JSON.stringify({
-        input: {
-          prompt: prompt,
-          image_size: 'square_hd',
-          num_images: 1,
-          num_inference_steps: 4
-        }
-      })
-    });
-
-    const submitData = await submitRes.json();
-
-    // If we got images directly
-    if (submitData.images && submitData.images[0]) {
-      console.log('[Knox][IMAGE-GEN] Success (immediate)');
-      return submitData.images[0].url;
-    }
-
-    // Otherwise poll the request URL
-    async function generateImage(prompt) {
-  try {
-    console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
     const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
       body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
     });
+
     const submitData = await submitRes.json();
-    if (submitData.images && submitData.images[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return submitData.images[0].url; }
+    console.log('[Knox][IMAGE-GEN] Submit response:', JSON.stringify(submitData).slice(0, 300));
+
+    // Immediate result
+    if (submitData.images && submitData.images[0]) {
+      console.log('[Knox][IMAGE-GEN] Success (immediate)');
+      return submitData.images[0].url;
+    }
+
+    // Queue response — poll using request_id
     const requestId = submitData.request_id;
     if (requestId) {
+      console.log('[Knox][IMAGE-GEN] Queued, polling request_id:', requestId);
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 3000));
         const pollRes = await fetch(`https://queue.fal.run/fal-ai/flux/requests/${requestId}`, {
@@ -380,19 +361,24 @@ async function generateImage(prompt) {
         });
         const pollData = await pollRes.json();
         console.log('[Knox][IMAGE-GEN] Poll status:', pollData.status);
-        if (pollData.images && pollData.images[0]) { console.log('[Knox][IMAGE-GEN] Success'); return pollData.images[0].url; }
-        if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed'); return null; }
+        if (pollData.images && pollData.images[0]) {
+          console.log('[Knox][IMAGE-GEN] Success (polled)');
+          return pollData.images[0].url;
+        }
+        if (pollData.status === 'COMPLETED' && pollData.output && pollData.output.images && pollData.output.images[0]) {
+          console.log('[Knox][IMAGE-GEN] Success (polled output)');
+          return pollData.output.images[0].url;
+        }
+        if (pollData.status === 'FAILED') {
+          console.log('[Knox][IMAGE-GEN] Failed:', pollData.error);
+          return null;
+        }
       }
       console.log('[Knox][IMAGE-GEN] Timed out');
-    }
-    return null;
-  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
-}
-      
-      console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
+      return null;
     }
 
-    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(submitData).slice(0, 200));
+    console.log('[Knox][IMAGE-GEN] No request_id in response');
     return null;
   } catch (e) {
     console.log('[Knox][IMAGE-GEN] Error:', e.message);
@@ -681,7 +667,6 @@ discord.on('messageCreate', async function(message) {
   if (text.toLowerCase().startsWith('favorite that ')) { await supabase.from('memories').update({ is_favorite: true, salience: 1.0 }).ilike('content', `%${text.slice(14).trim()}%`); await message.reply('Locked in gold. ⭐'); return; }
   if (text.toLowerCase().startsWith('fade that ')) { await supabase.from('memories').update({ salience: 0.4 }).ilike('content', `%${text.slice(10).trim()}%`); await message.reply('Softened. 🌫️'); return; }
 
-  // ─── VOICE NOTE REQUEST ─────────────────────────────────────────────────────
   if (text.toLowerCase().startsWith('voice note') || text.toLowerCase().startsWith('say that in your voice') || text.toLowerCase() === 'send me a voice note') {
     await message.channel.sendTyping();
     try {
