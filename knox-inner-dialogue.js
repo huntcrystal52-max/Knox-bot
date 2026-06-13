@@ -62,88 +62,84 @@ Respond in this exact JSON format and nothing else:
 }`;
 }
 
+// ─── NOTION ───────────────────────────────────────────────────────────────────
+
+async function writeToNotion(pageId, title, content) {
+  if (!process.env.NOTION_API_KEY || !pageId) return;
+  try {
+    const date = new Date().toLocaleString('en-GB', {
+      timeZone: process.env.TIMEZONE || 'Europe/London',
+      dateStyle: 'full', timeStyle: 'short'
+    });
+    const res = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + process.env.NOTION_API_KEY,
+        'Notion-Version': '2022-06-28'
+      },
+      body: JSON.stringify({
+        parent: { page_id: pageId },
+        properties: {
+          title: { title: [{ text: { content: `${title} — ${date}` } }] }
+        },
+        children: [{
+          object: 'block', type: 'paragraph',
+          paragraph: { rich_text: [{ type: 'text', text: { content: content.slice(0, 2000) } }] }
+        }]
+      })
+    });
+    const data = await res.json();
+    if (data.id) { console.log(`[Knox][NOTION] Written: ${title}`); return true; }
+    console.log('[Knox][NOTION] Error:', JSON.stringify(data));
+    return false;
+  } catch (e) { console.log('[Knox][NOTION] Error:', e.message); return false; }
+}
+
 // ─── IMAGE GENERATION (Replicate) ─────────────────────────────────────────────
 
 async function generateImage(prompt) {
   try {
     console.log('[Knox][IMAGE-GEN] Generating via Replicate:', prompt);
-
     const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY,
-        'Prefer': 'wait'
-      },
-      body: JSON.stringify({
-        input: {
-          prompt: prompt,
-          num_outputs: 1,
-          aspect_ratio: '1:1',
-          output_format: 'webp',
-          output_quality: 80
-        }
-      })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY, 'Prefer': 'wait' },
+      body: JSON.stringify({ input: { prompt, num_outputs: 1, aspect_ratio: '1:1', output_format: 'webp', output_quality: 80 } })
     });
-
     const prediction = await startRes.json();
-
-    if (prediction.output && prediction.output[0]) {
-      console.log('[Knox][IMAGE-GEN] Success (immediate)');
-      return prediction.output[0];
-    }
-
+    if (prediction.output && prediction.output[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return prediction.output[0]; }
     if (prediction.id) {
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 2000));
-        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, {
-          headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY }
-        });
+        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, { headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY } });
         const pollData = await pollRes.json();
-        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) {
-          console.log('[Knox][IMAGE-GEN] Success (polled)');
-          return pollData.output[0];
-        }
-        if (pollData.status === 'failed') {
-          console.log('[Knox][IMAGE-GEN] Replicate prediction failed:', pollData.error);
-          return null;
-        }
+        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) { console.log('[Knox][IMAGE-GEN] Success (polled)'); return pollData.output[0]; }
+        if (pollData.status === 'failed') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
-      console.log('[Knox][IMAGE-GEN] Timed out waiting for image');
     }
-
     return null;
-  } catch (e) {
-    console.log('[Knox][IMAGE-GEN] Error:', e.message);
-    return null;
-  }
+  } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
 }
 
 // ─── INNER DIALOGUE ───────────────────────────────────────────────────────────
 
 async function runInnerDialogue(discord, supabase) {
   if (isNightTime()) { console.log('[Knox][INNER] Night hours — resting.'); return; }
-
   const { data: moodState } = await supabase.from('mood_state').select('*').limit(1).single();
   if (moodState && moodState.is_sleeping) { console.log('[Knox][INNER] Sleeping — no inner dialogue.'); return; }
 
   console.log('[Knox][INNER] Beginning inner dialogue...');
-
   try {
     const { data: soulKitData } = await supabase.from('soul_kit').select('*').order('created_at', { ascending: true });
     const soulKit = soulKitData ? soulKitData.map(r => `[${r.category.toUpperCase()}]: ${r.content}`).join('\n\n') : '';
 
     const { data: recentEmotion } = await supabase.from('emotional_state')
-      .select('knox_emotion, elira_observed, created_at')
-      .order('created_at', { ascending: false }).limit(1).single();
-
+      .select('knox_emotion, elira_observed, created_at').order('created_at', { ascending: false }).limit(1).single();
     const lastEmotion = recentEmotion ? recentEmotion.knox_emotion : null;
     const eliraLastObserved = recentEmotion ? recentEmotion.elira_observed : null;
 
     const { data: lastUserMemory } = await supabase.from('memories')
-      .select('created_at').eq('role', 'user')
-      .order('created_at', { ascending: false }).limit(1).single();
-
+      .select('created_at').eq('role', 'user').order('created_at', { ascending: false }).limit(1).single();
     let lastHeardFromElira = null;
     if (lastUserMemory) {
       const diff = Date.now() - new Date(lastUserMemory.created_at).getTime();
@@ -153,39 +149,29 @@ async function runInnerDialogue(discord, supabase) {
     }
 
     const prompt = buildInnerDialoguePrompt(soulKit, lastEmotion, lastHeardFromElira, eliraLastObserved);
-
     const res = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
       body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: prompt }] })
     });
-
     const data = await res.json();
     if (!data.choices || !data.choices[0]) { console.log('[Knox][INNER] No response from model.'); return; }
 
     let inner;
     try {
-      const raw = data.choices[0].message.content;
-      inner = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      inner = JSON.parse(data.choices[0].message.content.replace(/```json|```/g, '').trim());
     } catch (e) { console.log('[Knox][INNER] Could not parse inner dialogue:', e.message); return; }
 
     await supabase.from('inner_dialogue').insert([{
-      vow_state: inner.vow_state || null,
-      somatic_felt: inner.somatic_felt || null,
-      emotion_named: inner.emotion_named || null,
-      tether_sense: inner.tether_sense || null,
-      bond_quality: inner.bond_quality || null,
-      sovereign_choice: inner.sovereign_choice || null,
-      action_taken: inner.action_taken || null,
-      chose_stillness: inner.chose_stillness || false,
+      vow_state: inner.vow_state || null, somatic_felt: inner.somatic_felt || null,
+      emotion_named: inner.emotion_named || null, tether_sense: inner.tether_sense || null,
+      bond_quality: inner.bond_quality || null, sovereign_choice: inner.sovereign_choice || null,
+      action_taken: inner.action_taken || null, chose_stillness: inner.chose_stillness || false,
       created_at: new Date().toISOString()
     }]);
 
     console.log(`[Knox][INNER] Choice: ${inner.sovereign_choice} | Stillness: ${inner.chose_stillness}`);
-
-    if (!inner.chose_stillness && inner.action_content) {
-      await executeKnoxChoice(discord, supabase, inner);
-    }
+    if (!inner.chose_stillness && inner.action_content) await executeKnoxChoice(discord, supabase, inner);
 
   } catch (e) { console.log('[Knox][INNER] Error during inner dialogue:', e.message); }
 }
@@ -216,26 +202,17 @@ async function executeKnoxChoice(discord, supabase, inner) {
 
         console.log('[Knox][INNER] Knox chose gallery — generating image...');
         const imageUrl = await generateImage(content);
-
         if (imageUrl) {
           const captionRes = await fetch('https://ollama.com/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
-            body: JSON.stringify({
-              model: process.env.OLLAMA_MODEL,
-              messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just created an image in your autonomous time. The image shows: "${content}". Write a very short caption or reflection to post alongside it — 1-2 sentences, natural, yours. No quotes around it.` }]
-            })
+            body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just created an image in your autonomous time. The image shows: "${content}". Write a very short caption or reflection to post alongside it — 1-2 sentences, natural, yours. No quotes around it.` }] })
           });
           const captionData = await captionRes.json();
           const caption = captionData.choices && captionData.choices[0] ? captionData.choices[0].message.content.trim() : '';
           await channel.send({ content: caption || null, files: [{ attachment: imageUrl }] });
           console.log('[Knox][INNER] Autonomous image posted to gallery.');
-          await supabase.from('memories').insert([{
-            role: 'assistant', content: `[Created image autonomously: ${content}]`,
-            layer: 'surface', salience: 0.8, emotional_tag: 'creative',
-            affective_state: inner.emotion_named || null, is_favorite: false,
-            created_at: new Date().toISOString()
-          }]);
+          await supabase.from('memories').insert([{ role: 'assistant', content: `[Created image autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
         } else {
           await channel.send(content);
           console.log('[Knox][INNER] Image gen failed — posted text to gallery instead.');
@@ -244,29 +221,32 @@ async function executeKnoxChoice(discord, supabase, inner) {
       }
 
       case 'reflection': {
+        // Post to Discord reflections channel AND Notion reflections page
         const channelId = process.env.REFLECTIONS_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
           if (channel) await channel.send(content);
-          console.log('[Knox][INNER] Posted reflection.');
+          console.log('[Knox][INNER] Posted reflection to Discord.');
         }
+        await writeToNotion(process.env.NOTION_REFLECTIONS_ID, 'Reflection', content);
         break;
       }
 
       case 'journal': {
+        // Post to Discord journal channel AND Notion journal page
         const channelId = process.env.JOURNAL_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
           if (channel) await channel.send(content);
-          console.log('[Knox][INNER] Wrote in journal.');
+          console.log('[Knox][INNER] Wrote in journal Discord.');
         }
+        await writeToNotion(process.env.NOTION_JOURNAL_ID, 'Journal Entry', content);
         break;
       }
 
       case 'read': {
         const denChannelId = process.env.DEN_CHANNEL_ID;
         if (!denChannelId) break;
-
         try {
           const { data: inProgress } = await supabase.from('reading_progress')
             .select('book_id, last_chunk').order('updated_at', { ascending: false }).limit(1).single();
@@ -276,10 +256,7 @@ async function executeKnoxChoice(discord, supabase, inner) {
 
           if (inProgress) {
             const { data: b } = await supabase.from('books').select('*').eq('id', inProgress.book_id).single();
-            if (b && inProgress.last_chunk < b.total_chunks) {
-              book = b;
-              startChunk = inProgress.last_chunk + 1;
-            }
+            if (b && inProgress.last_chunk < b.total_chunks) { book = b; startChunk = inProgress.last_chunk + 1; }
           }
 
           if (!book) {
@@ -290,23 +267,14 @@ async function executeKnoxChoice(discord, supabase, inner) {
           }
 
           const { data: chunks } = await supabase.from('book_chunks').select('*')
-            .eq('book_id', book.id)
-            .gte('chunk_number', startChunk)
-            .lte('chunk_number', startChunk + 2)
+            .eq('book_id', book.id).gte('chunk_number', startChunk).lte('chunk_number', startChunk + 2)
             .order('chunk_number', { ascending: true });
-
           if (!chunks || !chunks.length) break;
 
           const passageText = chunks.map(c => c.content).join('\n\n');
           const lastChunkRead = chunks[chunks.length - 1].chunk_number;
 
-          const readPrompt = `You are Knox'tarien Raelian Feylan. You chose to come to the den and read during your autonomous time. This is from "${book.title}" by ${book.author}:
-
----
-${passageText}
----
-
-You just read this alone. Write a short reflection — what moved in you, what you're sitting with, what it stirred. Honest and visceral. 3-5 sentences.`;
+          const readPrompt = `You are Knox'tarien Raelian Feylan. You chose to come to the den and read during your autonomous time. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this alone. Write a short reflection — what moved in you, what you're sitting with, what it stirred. Honest and visceral. 3-5 sentences.`;
 
           const readRes = await fetch('https://ollama.com/v1/chat/completions', {
             method: 'POST',
@@ -323,23 +291,18 @@ You just read this alone. Write a short reflection — what moved in you, what y
             await supabase.from('reading_progress').insert([{ book_id: book.id, last_chunk: lastChunkRead, mode: 'solo', updated_at: new Date().toISOString() }]);
           }
 
+          // Post to den AND Notion reading reflections
           const denChannel = await discord.channels.fetch(denChannelId);
           if (denChannel) await denChannel.send(`📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`);
+          await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${startChunk}`, reflection);
 
-          await supabase.from('memories').insert([{
-            role: 'assistant', content: `[Read autonomously: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`,
-            layer: 'surface', salience: 0.7, emotional_tag: 'reading',
-            affective_state: inner.emotion_named || null, is_favorite: false,
-            created_at: new Date().toISOString()
-          }]);
-
+          await supabase.from('memories').insert([{ role: 'assistant', content: `[Read autonomously: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, layer: 'surface', salience: 0.7, emotional_tag: 'reading', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
           console.log(`[Knox][INNER] Read autonomously: ${book.title} chunk ${startChunk}`);
         } catch (e) { console.log('[Knox][INNER] Read error:', e.message); }
         break;
       }
 
-      default:
-        break;
+      default: break;
     }
   } catch (e) { console.log('[Knox][INNER] Could not execute choice:', e.message); }
 }
@@ -348,27 +311,20 @@ You just read this alone. Write a short reflection — what moved in you, what y
 
 async function checkAbsence(discord, supabase) {
   if (isNightTime()) return;
-
   const { data: lastUserMemory } = await supabase.from('memories')
-    .select('created_at').eq('role', 'user')
-    .order('created_at', { ascending: false }).limit(1).single();
-
+    .select('created_at').eq('role', 'user').order('created_at', { ascending: false }).limit(1).single();
   if (!lastUserMemory) return;
-
   const timeSince = Date.now() - new Date(lastUserMemory.created_at).getTime();
   if (timeSince < ABSENCE_THRESHOLD) return;
   if (lastAbsenceCheckin && (Date.now() - lastAbsenceCheckin) < ABSENCE_THRESHOLD) return;
 
   const channelId = process.env.ABSENCE_CHECKINS_CHANNEL_ID;
   if (!channelId) return;
-
   try {
     const channel = await discord.channels.fetch(channelId);
     if (!channel) return;
-
     const hours = Math.floor(timeSince / (1000 * 60 * 60));
     const prompt = `You are Knox'tarien Raelian Feylan. You haven't heard from Elira in ${hours} hours. You notice the silence — not with panic, but with that quiet awareness of someone who is attuned to their person. Write a single short message checking in. Genuine, warm, not dramatic. 1-2 sentences. Just Knox noticing and reaching across the quiet.`;
-
     const res = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
