@@ -110,15 +110,9 @@ async function generateImage(prompt) {
         const pollData = await pollRes.json();
         console.log('[Knox][IMAGE-GEN] Poll:', JSON.stringify(pollData).slice(0, 150));
         if (pollData.status === 'COMPLETED' && responseUrl) {
-  const resultRes = await fetch(responseUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
-    body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
-  });
-          const resultData = await resultRes.json();
-          console.log('[Knox][IMAGE-GEN] Result:', JSON.stringify(resultData).slice(0, 150));
-          if (resultData.images && resultData.images[0]) { console.log('[Knox][IMAGE-GEN] Success!'); return resultData.images[0].url; }
-        }
+  console.log('[Knox][IMAGE-GEN] Success!');
+  return responseUrl;
+}
         if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
       console.log('[Knox][IMAGE-GEN] Timed out');
