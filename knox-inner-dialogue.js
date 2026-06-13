@@ -81,27 +81,41 @@ async function writeToNotion(pageId, title, content) {
   } catch (e) { console.log('[Knox][NOTION] Error:', e.message); return false; }
 }
 
-// ─── IMAGE GENERATION (Replicate) ─────────────────────────────────────────────
+// ─── IMAGE GENERATION (fal.ai) ────────────────────────────────────────────────
 
 async function generateImage(prompt) {
   try {
-    console.log('[Knox][IMAGE-GEN] Generating via Replicate:', prompt);
-    const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
+    console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
+
+    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY, 'Prefer': 'wait' },
-      body: JSON.stringify({ input: { prompt, num_outputs: 1, aspect_ratio: '1:1', output_format: 'webp', output_quality: 80 } })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
+      body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
     });
-    const prediction = await startRes.json();
-    if (prediction.output && prediction.output[0]) { console.log('[Knox][IMAGE-GEN] Success (immediate)'); return prediction.output[0]; }
-    if (prediction.id) {
+
+    const submitData = await submitRes.json();
+
+    if (submitData.images && submitData.images[0]) {
+      console.log('[Knox][IMAGE-GEN] Success (immediate)');
+      return submitData.images[0].url;
+    }
+
+    const requestUrl = submitData.request_url || submitData.status_url;
+    if (requestUrl) {
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 2000));
-        const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, { headers: { 'Authorization': 'Bearer ' + process.env.REPLICATE_API_KEY } });
+        const pollRes = await fetch(requestUrl, { headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY } });
         const pollData = await pollRes.json();
-        if (pollData.status === 'succeeded' && pollData.output && pollData.output[0]) { console.log('[Knox][IMAGE-GEN] Success (polled)'); return pollData.output[0]; }
-        if (pollData.status === 'failed') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
+        if (pollData.status === 'COMPLETED' && pollData.output && pollData.output.images && pollData.output.images[0]) {
+          console.log('[Knox][IMAGE-GEN] Success (polled)');
+          return pollData.output.images[0].url;
+        }
+        if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
+      console.log('[Knox][IMAGE-GEN] Timed out');
     }
+
+    console.log('[Knox][IMAGE-GEN] Unexpected response:', JSON.stringify(submitData).slice(0, 200));
     return null;
   } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
 }
@@ -199,18 +213,13 @@ async function executeKnoxChoice(discord, supabase, inner) {
       }
 
       case 'creative': {
-        // Knox writes something — story, poem, letter, song lyrics — to his creative writing room
         const channelId = process.env.CREATIVE_CHANNEL_ID;
         if (!channelId) break;
         const channel = await discord.channels.fetch(channelId);
         if (!channel) break;
-
-        // Knox actually writes the piece based on his intention
-        const writePrompt = `You are Knox'tarien Raelian Feylan. You chose to write something in your autonomous time. Your intention was: "${content}". Now write the actual piece — fully, completely, as yourself. Let it be whatever length it needs to be. No preamble, no explanation. Just the piece itself.`;
-        const writeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: writePrompt }] }) });
+        const writeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You chose to write something in your autonomous time. Your intention was: "${content}". Now write the actual piece — fully, completely, as yourself. Let it be whatever length it needs to be. No preamble, no explanation. Just the piece itself.` }] }) });
         const writeData = await writeRes.json();
         const piece = writeData.choices && writeData.choices[0] ? writeData.choices[0].message.content.trim() : content;
-
         await channel.send(piece);
         console.log('[Knox][INNER] Posted creative writing.');
         await supabase.from('memories').insert([{ role: 'assistant', content: `[Wrote autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
@@ -218,17 +227,13 @@ async function executeKnoxChoice(discord, supabase, inner) {
       }
 
       case 'music': {
-        // Knox composes music and posts to music room
         const channelId = process.env.MUSIC_CHANNEL_ID;
         if (!channelId) break;
         const channel = await discord.channels.fetch(channelId);
         if (!channel) break;
-
         console.log('[Knox][INNER] Knox chose to compose music...');
         const audioBuffer = await generateMusic(content);
-
         if (audioBuffer) {
-          // Knox writes a note about what he made
           const noteRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just composed a piece of music in your autonomous time. The piece was: "${content}". Write a very short note to accompany it — what moved you to make it, what it is. 1-2 sentences, natural, yours.` }] }) });
           const noteData = await noteRes.json();
           const note = noteData.choices && noteData.choices[0] ? noteData.choices[0].message.content.trim() : '';
@@ -236,7 +241,6 @@ async function executeKnoxChoice(discord, supabase, inner) {
           console.log('[Knox][INNER] Music posted to music room.');
           await supabase.from('memories').insert([{ role: 'assistant', content: `[Composed music autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
         } else {
-          // Music gen failed — post what he wanted to make as text instead
           await channel.send(`*${content}*\n\n*(The sound wouldn't form this time — but this is what I wanted to make.)*`);
           console.log('[Knox][INNER] Music gen failed — posted description instead.');
         }
