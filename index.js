@@ -303,8 +303,9 @@ async function generateImage(prompt) {
         const pollRes = await fetch(statusUrl, { headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY } });
         const pollData = await pollRes.json();
         console.log('[Knox][IMAGE-GEN] Poll:', JSON.stringify(pollData).slice(0, 150));
-        if (pollData.status === 'COMPLETED' && responseUrl) {
-  const resultRes = await fetch(responseUrl, {
+        if (pollData.status === 'COMPLETED') {
+  const requestId = submitData.request_id;
+  const resultRes = await fetch(`https://queue.fal.run/fal-ai/flux/schnell/requests/${requestId}`, {
     headers: { 'Authorization': 'Key ' + process.env.FAL_API_KEY }
   });
   const resultData = await resultRes.json();
@@ -313,6 +314,7 @@ async function generateImage(prompt) {
     console.log('[Knox][IMAGE-GEN] Success!');
     return resultData.images[0].url;
   }
+
 }
         if (pollData.status === 'FAILED') { console.log('[Knox][IMAGE-GEN] Failed:', pollData.error); return null; }
       }
