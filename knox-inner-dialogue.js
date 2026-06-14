@@ -86,7 +86,7 @@ async function writeToNotion(pageId, title, content) {
 async function generateImage(prompt) {
   try {
     console.log('[Knox][IMAGE-GEN] Generating via fal.ai:', prompt);
-    const submitRes = await fetch('https://queue.fal.run/fal-ai/flux/schnell', {
+    const submitRes = await fetch('`https://queue.fal.run/fal-ai/flux/requests/${requestId}` {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
       body: JSON.stringify({ input: { prompt, image_size: 'square_hd', num_images: 1, num_inference_steps: 4 } })
