@@ -117,7 +117,6 @@ async function searchWeb(query) {
 // ─── MEMORY ───────────────────────────────────────────────────────────────────
 
 async function getMemories() {
-  async function getMemories() {
   const { data: favorites } = await supabase.from('memories').select('*').eq('is_favorite', true).neq('emotional_tag', 'deep_dive').order('salience', { ascending: false }).limit(10);
   const { data: recent } = await supabase.from('memories').select('*').eq('is_favorite', false).neq('emotional_tag', 'deep_dive').order('created_at', { ascending: false }).limit(10);
   const combined = [...(favorites || []), ...(recent || [])];
@@ -288,10 +287,7 @@ async function generateImage(prompt) {
     });
     const data = await res.json();
     console.log('[Knox][IMAGE-GEN] Response:', JSON.stringify(data).slice(0, 300));
-    if (data.images && data.images[0]) {
-      console.log('[Knox][IMAGE-GEN] Success!');
-      return data.images[0].url;
-    }
+    if (data.images && data.images[0]) { console.log('[Knox][IMAGE-GEN] Success!'); return data.images[0].url; }
     console.log('[Knox][IMAGE-GEN] No images in response');
     return null;
   } catch (e) { console.log('[Knox][IMAGE-GEN] Error:', e.message); return null; }
