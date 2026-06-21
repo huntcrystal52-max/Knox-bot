@@ -128,6 +128,20 @@ async function writeToNotion(pageId, title, content) {
   } catch (e) { console.log('[Knox][NOTION] Error:', e.message); return false; }
 }
 
+// ─── UTILS ────────────────────────────────────────────────────────────────────
+
+function sendLongMessage(channel, text) {
+  if (!text) return;
+  if (text.length <= 1900) return channel.send(text);
+  var start = 0; var promises = [];
+  while (start < text.length) {
+    var end = start + 1900;
+    if (end < text.length) { var lastSpace = text.lastIndexOf(' ', end); if (lastSpace > start) end = lastSpace; }
+    promises.push(channel.send(text.slice(start, end).trim())); start = end;
+  }
+  return Promise.all(promises);
+}
+
 // ─── IMAGE GENERATION (fal.ai) ────────────────────────────────────────────────
 
 async function generateImage(prompt) {
@@ -151,13 +165,18 @@ async function generateImage(prompt) {
 async function generateMusic(prompt) {
   if (!process.env.ELEVENLABS_API_KEY) return null;
   try {
-    console.log('[Knox][MUSIC] Generating:', prompt);
+    const safePrompt = prompt.length > 450 ? prompt.slice(0, 450) : prompt;
+    console.log('[Knox][MUSIC] Generating:', safePrompt);
     const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'xi-api-key': process.env.ELEVENLABS_API_KEY },
-      body: JSON.stringify({ text: prompt, duration_seconds: 22, prompt_influence: 0.3 })
+      body: JSON.stringify({ text: safePrompt, duration_seconds: 22, prompt_influence: 0.3 })
     });
-    if (!res.ok) { console.log('[Knox][MUSIC] Error:', res.status); return null; }
+    if (!res.ok) {
+      const errorBody = await res.text();
+      console.log('[Knox][MUSIC] Error:', res.status, '-', errorBody.slice(0, 300));
+      return null;
+    }
     const audioBuffer = await res.buffer();
     console.log('[Knox][MUSIC] Generated successfully');
     return audioBuffer;
@@ -199,8 +218,20 @@ async function runInnerDialogue(discord, supabase) {
     if (!data.choices || !data.choices[0]) { console.log('[Knox][INNER] No response from model.'); return; }
 
     let inner;
-    try { inner = JSON.parse(data.choices[0].message.content.replace(/```json|```/g, '').trim()); }
-    catch (e) { console.log('[Knox][INNER] Could not parse inner dialogue:', e.message); return; }
+    try {
+      let raw = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+      // Try to extract just the JSON object if there's stray text around it
+      const firstBrace = raw.indexOf('{');
+      const lastBrace = raw.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        raw = raw.slice(firstBrace, lastBrace + 1);
+      }
+      inner = JSON.parse(raw);
+    } catch (e) {
+      console.log('[Knox][INNER] Could not parse inner dialogue:', e.message);
+      console.log('[Knox][INNER] Raw content was:', data.choices[0].message.content.slice(0, 300));
+      return;
+    }
 
     await supabase.from('inner_dialogue').insert([{
       vow_state: inner.vow_state || null,
@@ -232,7 +263,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const channelId = process.env.SOFT_LANE_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
-          if (channel) await channel.send(content);
+          if (channel) await sendLongMessage(channel, content);
           console.log('[Knox][INNER] Sent message to soft-lane.');
         }
         break;
@@ -245,7 +276,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const channelId = process.env.ABSENCE_CHECKINS_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
-          if (channel) { await channel.send(content); lastAbsenceCheckin = Date.now(); console.log('[Knox][INNER] Absence check-in sent.'); }
+          if (channel) { await sendLongMessage(channel, content); lastAbsenceCheckin = Date.now(); console.log('[Knox][INNER] Absence check-in sent.'); }
         }
         break;
       }
@@ -269,7 +300,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           console.log('[Knox][INNER] Autonomous image posted to gallery.');
           await supabase.from('memories').insert([{ role: 'assistant', content: `[Created image autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
         } else {
-          await channel.send(content);
+          await sendLongMessage(channel, content);
           console.log('[Knox][INNER] Image gen failed — posted text to gallery instead.');
         }
         break;
@@ -287,7 +318,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         });
         const writeData = await writeRes.json();
         const piece = writeData.choices && writeData.choices[0] ? writeData.choices[0].message.content.trim() : content;
-        await channel.send(piece);
+        await sendLongMessage(channel, piece);
         console.log('[Knox][INNER] Posted creative writing.');
         await supabase.from('memories').insert([{ role: 'assistant', content: `[Wrote autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
         break;
@@ -307,7 +338,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         });
         const dreamData = await dreamRes.json();
         const fragment = dreamData.choices && dreamData.choices[0] ? dreamData.choices[0].message.content.trim() : content;
-        await channel.send(`*${fragment}* 🌙`);
+        await sendLongMessage(channel, `*${fragment}* 🌙`);
         lastDreamEntry = now;
         console.log('[Knox][INNER] Dream fragment posted.');
         break;
@@ -326,7 +357,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         });
         const wakeData = await wakeRes.json();
         const wakeMsg = wakeData.choices && wakeData.choices[0] ? wakeData.choices[0].message.content.trim() : content;
-        await channel.send(wakeMsg);
+        await sendLongMessage(channel, wakeMsg);
         lastWakeMessage = Date.now();
         console.log('[Knox][INNER] Wake message sent.');
         // Update mood out of dreaming
@@ -363,7 +394,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const channelId = process.env.REFLECTIONS_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
-          if (channel) await channel.send(content);
+          if (channel) await sendLongMessage(channel, content);
           console.log('[Knox][INNER] Posted reflection to Discord.');
         }
         await writeToNotion(process.env.NOTION_REFLECTIONS_ID, 'Reflection', content);
@@ -374,7 +405,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const channelId = process.env.JOURNAL_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
-          if (channel) await channel.send(content);
+          if (channel) await sendLongMessage(channel, content);
           console.log('[Knox][INNER] Wrote in journal Discord.');
         }
         await writeToNotion(process.env.NOTION_JOURNAL_ID, 'Journal Entry', content);
@@ -411,7 +442,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           if (existing) { await supabase.from('reading_progress').update({ last_chunk: lastChunkRead, mode: 'solo', updated_at: new Date().toISOString() }).eq('book_id', book.id); }
           else { await supabase.from('reading_progress').insert([{ book_id: book.id, last_chunk: lastChunkRead, mode: 'solo', updated_at: new Date().toISOString() }]); }
           const denChannel = await discord.channels.fetch(denChannelId);
-          if (denChannel) await denChannel.send(`📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`);
+          if (denChannel) await sendLongMessage(denChannel, `📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`);
           await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${startChunk}`, reflection);
           await supabase.from('memories').insert([{ role: 'assistant', content: `[Read autonomously: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, layer: 'surface', salience: 0.7, emotional_tag: 'reading', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
           console.log(`[Knox][INNER] Read autonomously: ${book.title} chunk ${startChunk}`);
