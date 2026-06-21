@@ -125,7 +125,8 @@ async function getMemories() {
 }
 
 async function saveMemory(role, content, layer, salience, emotional_tag, affective_state) {
-  const { data } = await supabase.from('memories').insert([{ role, content, layer: layer || 'surface', salience: salience || 1.0, emotional_tag: emotional_tag || '', affective_state: affective_state || null, is_favorite: false, created_at: new Date().toISOString() }]).select();
+  const { data, error } = await supabase.from('memories').insert([{ role, content, layer: layer || 'surface', salience: salience || 1.0, emotional_tag: emotional_tag || '', affective_state: affective_state || null, is_favorite: false, created_at: new Date().toISOString() }]).select();
+  if (error) { console.log('[Knox][MEMORY] Save error:', JSON.stringify(error)); return null; }
   return data ? data[0] : null;
 }
 
