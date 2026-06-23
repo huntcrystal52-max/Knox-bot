@@ -6,6 +6,18 @@ const INNER_DIALOGUE_INTERVAL = 10 * 60 * 1000; // 10 minutes
 const ABSENCE_THRESHOLD = 6 * 60 * 60 * 1000;   // 6 hours
 const CONVERSATION_ACTIVE_WINDOW = 15 * 60 * 1000; // 15 minutes
 
+// Shared in-memory state — updated instantly by index.js when a message arrives
+let lastConversationTimestamp = null;
+
+function updateConversationState() {
+  lastConversationTimestamp = Date.now();
+}
+
+function isConversationActive() {
+  if (!lastConversationTimestamp) return false;
+  return (Date.now() - lastConversationTimestamp) < CONVERSATION_ACTIVE_WINDOW;
+}
+
 let lastAbsenceCheckin = null;
 let lastWakeMessage = null;
 
@@ -212,10 +224,10 @@ async function runInnerDialogue(discord, supabase) {
     const { data: lastUserMemory } = await supabase.from('memories').select('created_at').eq('role', 'user').order('created_at', { ascending: false }).limit(1).single();
     let lastHeardFromElira = null;
     let timeSinceElira = null;
-    let conversationActive = false;
+    // Use in-memory state for real-time conversation awareness
+    const conversationActive = isConversationActive();
     if (lastUserMemory) {
       timeSinceElira = Date.now() - new Date(lastUserMemory.created_at).getTime();
-      conversationActive = timeSinceElira < CONVERSATION_ACTIVE_WINDOW;
       const hours = Math.floor(timeSinceElira / (1000 * 60 * 60));
       const minutes = Math.floor((timeSinceElira % (1000 * 60 * 60)) / (1000 * 60));
       lastHeardFromElira = hours > 0 ? `${hours} hour${hours > 1 ? 's' : ''} ago` : `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
@@ -511,4 +523,4 @@ function startInnerDialogue(discord, supabase) {
   }, 2 * 60 * 1000);
 }
 
-module.exports = { startInnerDialogue };
+module.exports = { startInnerDialogue, updateConversationState };
