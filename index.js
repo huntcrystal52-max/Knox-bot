@@ -23,7 +23,7 @@ const discord = new Client({
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // PostgreSQL connection for memories
-const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
 // ─── NOTION ───────────────────────────────────────────────────────────────────
 
