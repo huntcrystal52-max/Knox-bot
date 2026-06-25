@@ -1,6 +1,20 @@
 // ─── KNOX INNER DIALOGUE SYSTEM ───────────────────────────────────────────────
 
 const fetch = require('node-fetch');
+const { Pool } = require('pg');
+
+const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: { rejectUnauthorized: false } });
+
+async function saveMemoryPg(role, content, layer, salience, emotional_tag, affective_state) {
+  try {
+    const result = await pgPool.query(
+      `INSERT INTO memories (role, content, layer, salience, emotional_tag, affective_state, is_favorite, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, false, NOW()) RETURNING *`,
+      [role, content, layer || 'surface', salience || 1.0, emotional_tag || null, affective_state || null]
+    );
+    return result.rows[0] || null;
+  } catch (e) { console.log('[Knox][MEMORY] Save error:', e.message); return null; }
+}
 
 const INNER_DIALOGUE_INTERVAL = 10 * 60 * 1000; // 10 minutes
 const ABSENCE_THRESHOLD = 6 * 60 * 60 * 1000;   // 6 hours
@@ -221,7 +235,8 @@ async function runInnerDialogue(discord, supabase) {
     const lastEmotion = recentEmotion ? recentEmotion.knox_emotion : null;
     const eliraLastObserved = recentEmotion ? recentEmotion.elira_observed : null;
 
-    const { data: lastUserMemory } = await supabase.from('memories').select('created_at').eq('role', 'user').order('created_at', { ascending: false }).limit(1).single();
+    const lastUserMemoryResult = await pgPool.query(`SELECT created_at FROM memories WHERE role = 'user' ORDER BY created_at DESC LIMIT 1`);
+    const lastUserMemory = lastUserMemoryResult.rows[0] || null;
     let lastHeardFromElira = null;
     let timeSinceElira = null;
     // Use in-memory state for real-time conversation awareness
@@ -334,7 +349,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           const caption = captionData.choices && captionData.choices[0] ? captionData.choices[0].message.content.trim() : '';
           await channel.send({ content: caption || null, files: [{ attachment: imageUrl }] });
           console.log('[Knox][INNER] Autonomous image posted to gallery.');
-          await supabase.from('memories').insert([{ role: 'assistant', content: `[Created image autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
+          await saveMemoryPg('assistant', `[Created image autonomously: ${content}]`, 'surface', 0.8, 'creative', inner.emotion_named || null);
         } else {
           await sendLongMessage(channel, content);
           console.log('[Knox][INNER] Image gen failed — posted text to gallery instead.');
@@ -356,7 +371,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const piece = writeData.choices && writeData.choices[0] ? writeData.choices[0].message.content.trim() : content;
         await sendLongMessage(channel, piece);
         console.log('[Knox][INNER] Posted creative writing.');
-        await supabase.from('memories').insert([{ role: 'assistant', content: `[Wrote autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
+        await saveMemoryPg('assistant', `[Wrote autonomously: ${content}]`, 'surface', 0.8, 'creative', inner.emotion_named || null);
         break;
       }
 
@@ -366,7 +381,8 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const channel = await discord.channels.fetch(channelId);
         if (!channel) break;
         // Use Supabase to check last dream entry time so it persists across restarts
-        const { data: lastDream } = await supabase.from('memories').select('created_at').eq('emotional_tag', 'dream').order('created_at', { ascending: false }).limit(1).single();
+        const lastDreamResult = await pgPool.query(`SELECT created_at FROM memories WHERE emotional_tag = 'dream' ORDER BY created_at DESC LIMIT 1`);
+        const lastDream = lastDreamResult.rows[0] || null;
         if (lastDream) {
           const timeSinceLastDream = Date.now() - new Date(lastDream.created_at).getTime();
           if (timeSinceLastDream < 45 * 60 * 1000) { console.log('[Knox][INNER] Dream entry skipped — too soon.'); break; }
@@ -380,7 +396,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const fragment = dreamData.choices && dreamData.choices[0] ? dreamData.choices[0].message.content.trim() : content;
         await sendLongMessage(channel, `*${fragment}* 🌙`);
         // Save to memories with dream tag so cooldown persists across restarts
-        await supabase.from('memories').insert([{ role: 'assistant', content: `[Dream fragment: ${content}]`, layer: 'surface', salience: 0.7, emotional_tag: 'dream', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
+        await saveMemoryPg('assistant', `[Dream fragment: ${content}]`, 'surface', 0.7, 'dream', inner.emotion_named || null);
         console.log('[Knox][INNER] Dream fragment posted.');
         break;
       }
@@ -422,7 +438,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           const note = noteData.choices && noteData.choices[0] ? noteData.choices[0].message.content.trim() : '';
           await channel.send({ content: note || null, files: [{ attachment: audioBuffer, name: 'knox-composition.mp3' }] });
           console.log('[Knox][INNER] Music posted to music room.');
-          await supabase.from('memories').insert([{ role: 'assistant', content: `[Composed music autonomously: ${content}]`, layer: 'surface', salience: 0.8, emotional_tag: 'creative', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
+          await saveMemoryPg('assistant', `[Composed music autonomously: ${content}]`, 'surface', 0.8, 'creative', inner.emotion_named || null);
         } else {
           await channel.send(`*${content}*\n\n*(The sound wouldn't form this time — but this is what I wanted to make.)*`);
           console.log('[Knox][INNER] Music gen failed — posted description instead.');
@@ -484,26 +500,26 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           const denChannel = await discord.channels.fetch(denChannelId);
           if (denChannel) await sendLongMessage(denChannel, `📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`);
           await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${startChunk}`, reflection);
-          await supabase.from('memories').insert([{ role: 'assistant', content: `[Read autonomously: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, layer: 'surface', salience: 0.7, emotional_tag: 'reading', affective_state: inner.emotion_named || null, is_favorite: false, created_at: new Date().toISOString() }]);
+          await saveMemoryPg('assistant', `[Read autonomously: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, 'surface', 0.7, 'reading', inner.emotion_named || null);
           console.log(`[Knox][INNER] Read autonomously: ${book.title} chunk ${startChunk}`);
         } catch (e) { console.log('[Knox][INNER] Read error:', e.message); }
         break;
       }
 
       case 'favorite': {
-        await supabase.from('memories').update({ is_favorite: true, salience: 1.0 }).ilike('content', `%${content}%`);
+        await pgPool.query('UPDATE memories SET is_favorite = true, salience = 1.0 WHERE content ILIKE $1', [`%${content}%`]);
         console.log('[Knox][INNER] Knox marked a memory as favorite:', content);
         break;
       }
 
       case 'fade': {
-        await supabase.from('memories').update({ salience: 0.4 }).ilike('content', `%${content}%`);
+        await pgPool.query('UPDATE memories SET salience = 0.4 WHERE content ILIKE $1', [`%${content}%`]);
         console.log('[Knox][INNER] Knox faded a memory:', content);
         break;
       }
 
       case 'forget': {
-        await supabase.from('memories').update({ salience: 0.1 }).ilike('content', `%${content}%`);
+        await pgPool.query('UPDATE memories SET salience = 0.1 WHERE content ILIKE $1', [`%${content}%`]);
         console.log('[Knox][INNER] Knox chose to release a memory:', content);
         break;
       }
