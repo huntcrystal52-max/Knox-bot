@@ -3,7 +3,7 @@
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
 
-const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
 async function saveMemoryPg(role, content, layer, salience, emotional_tag, affective_state) {
   try {
