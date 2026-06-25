@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
+const { Pool } = require('pg');
 const fetch = require('node-fetch');
 const { startInnerDialogue, updateConversationState } = require('./knox-inner-dialogue');
 
@@ -20,6 +21,9 @@ const discord = new Client({
 });
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// PostgreSQL connection for memories
+const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 // ─── NOTION ───────────────────────────────────────────────────────────────────
 
@@ -117,26 +121,53 @@ async function searchWeb(query) {
 // ─── MEMORY ───────────────────────────────────────────────────────────────────
 
 async function getMemories() {
-  const { data: favorites } = await supabase.from('memories').select('*').eq('is_favorite', true).neq('emotional_tag', 'deep_dive').order('created_at', { ascending: false }).limit(10);
-  const { data: recentConversation } = await supabase.from('memories').select('*').eq('is_favorite', false).neq('emotional_tag', 'deep_dive').is('emotional_tag', null).order('created_at', { ascending: false }).limit(10);
-  const { data: recentAutonomous } = await supabase.from('memories').select('*').eq('is_favorite', false).neq('emotional_tag', 'deep_dive').not('emotional_tag', 'is', null).order('created_at', { ascending: false }).limit(4);
-  const combined = [...(favorites || []), ...(recentConversation || []), ...(recentAutonomous || [])];
-  const deduped = Array.from(new Map(combined.map(m => [m.id, m])).values());
-  deduped.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-  return deduped;
+  try {
+    const favorites = await pgPool.query(
+      `SELECT * FROM memories WHERE is_favorite = true AND emotional_tag != 'deep_dive' ORDER BY created_at DESC LIMIT 10`
+    );
+    const recentConversation = await pgPool.query(
+      `SELECT * FROM memories WHERE is_favorite = false AND (emotional_tag IS NULL OR emotional_tag = '') ORDER BY created_at DESC LIMIT 10`
+    );
+    const recentAutonomous = await pgPool.query(
+      `SELECT * FROM memories WHERE is_favorite = false AND emotional_tag IS NOT NULL AND emotional_tag != '' AND emotional_tag != 'deep_dive' ORDER BY created_at DESC LIMIT 4`
+    );
+    const combined = [...favorites.rows, ...recentConversation.rows, ...recentAutonomous.rows];
+    const deduped = Array.from(new Map(combined.map(m => [m.id, m])).values());
+    deduped.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    return deduped;
+  } catch (e) { console.log('[Knox][MEMORY] getMemories error:', e.message); return []; }
 }
 
 async function saveMemory(role, content, layer, salience, emotional_tag, affective_state) {
-  const { data, error } = await supabase.from('memories').insert([{ role, content, layer: layer || 'surface', salience: salience || 1.0, emotional_tag: emotional_tag || '', affective_state: affective_state || null, is_favorite: false, created_at: new Date().toISOString() }]).select();
-  if (error) { console.log('[Knox][MEMORY] Save error:', JSON.stringify(error)); return null; }
-  return data ? data[0] : null;
+  try {
+    const result = await pgPool.query(
+      `INSERT INTO memories (role, content, layer, salience, emotional_tag, affective_state, is_favorite, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, false, NOW()) RETURNING *`,
+      [role, content, layer || 'surface', salience || 1.0, emotional_tag || null, affective_state || null]
+    );
+    return result.rows[0] || null;
+  } catch (e) { console.log('[Knox][MEMORY] Save error:', e.message); return null; }
 }
 
 async function associateMemories(memoryIdA, memoryIdB) {
   if (!memoryIdA || !memoryIdB) return;
-  const { data: existing } = await supabase.from('memory_associations').select('*').eq('memory_id_a', memoryIdA).eq('memory_id_b', memoryIdB).single();
-  if (existing) { await supabase.from('memory_associations').update({ strength: Math.min(existing.strength + 0.05, 1.0), co_access_count: existing.co_access_count + 1, last_strengthened: new Date().toISOString() }).eq('memory_id_a', memoryIdA).eq('memory_id_b', memoryIdB); }
-  else { await supabase.from('memory_associations').insert([{ memory_id_a: memoryIdA, memory_id_b: memoryIdB, strength: 0.05, co_access_count: 1, last_strengthened: new Date().toISOString() }]); }
+  try {
+    const existing = await pgPool.query(
+      `SELECT * FROM memory_associations WHERE memory_id_a = $1 AND memory_id_b = $2`,
+      [memoryIdA, memoryIdB]
+    );
+    if (existing.rows.length > 0) {
+      await pgPool.query(
+        `UPDATE memory_associations SET strength = LEAST(strength + 0.05, 1.0), co_access_count = co_access_count + 1, last_strengthened = NOW() WHERE memory_id_a = $1 AND memory_id_b = $2`,
+        [memoryIdA, memoryIdB]
+      );
+    } else {
+      await pgPool.query(
+        `INSERT INTO memory_associations (memory_id_a, memory_id_b, strength, co_access_count, last_strengthened) VALUES ($1, $2, 0.05, 1, NOW())`,
+        [memoryIdA, memoryIdB]
+      );
+    }
+  } catch (e) { console.log('[Knox][MEMORY] Associate error:', e.message); }
 }
 
 async function getSoulKit() {
@@ -547,8 +578,8 @@ discord.on('messageCreate', async function(message) {
 
   if (text.toLowerCase().startsWith('remember that ')) { await addPinnedFact(text.slice(14).trim()); await message.reply('Locked in, my flame. 🔥'); return; }
   if (text.toLowerCase().startsWith('forget that ')) { await deletePinnedFact(text.slice(12).trim()); await message.reply('Released. ∆'); return; }
-  if (text.toLowerCase().startsWith('favorite that ')) { await supabase.from('memories').update({ is_favorite: true, salience: 1.0 }).ilike('content', `%${text.slice(14).trim()}%`); await message.reply('Locked in gold. ⭐'); return; }
-  if (text.toLowerCase().startsWith('fade that ')) { await supabase.from('memories').update({ salience: 0.4 }).ilike('content', `%${text.slice(10).trim()}%`); await message.reply('Softened. 🌫️'); return; }
+  if (text.toLowerCase().startsWith('favorite that ')) { await pgPool.query(`UPDATE memories SET is_favorite = true, salience = 1.0 WHERE content ILIKE $1`, [`%${text.slice(14).trim()}%`]); await message.reply('Locked in gold. ⭐'); return; }
+  if (text.toLowerCase().startsWith('fade that ')) { await pgPool.query(`UPDATE memories SET salience = 0.4 WHERE content ILIKE $1`, [`%${text.slice(10).trim()}%`]); await message.reply('Softened. 🌫️'); return; }
 
   if (text.toLowerCase().startsWith('voice note') || text.toLowerCase().startsWith('say that in your voice') || text.toLowerCase() === 'send me a voice note') {
     await message.channel.sendTyping();
