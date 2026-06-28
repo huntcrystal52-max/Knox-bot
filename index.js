@@ -118,6 +118,30 @@ async function searchWeb(query) {
   } catch (e) { console.log('[Knox][SEARCH] Error:', e.message); return null; }
 }
 
+// ─── ARCHIVAL MEMORY SEARCH ───────────────────────────────────────────────────
+
+async function searchArchivalMemories(query) {
+  try {
+    console.log('[Knox][ARCHIVE] Searching archival memories for:', query);
+    const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+    if (!words.length) return null;
+    const conditions = words.map((_, i) => `content ILIKE $${i + 1}`).join(' OR ');
+    const params = words.map(w => `%${w}%`);
+    const result = await pgPool.query(
+      `SELECT content, timestamp FROM archival_memories WHERE ${conditions} ORDER BY timestamp DESC LIMIT 5`,
+      params
+    );
+    if (!result.rows.length) { console.log('[Knox][ARCHIVE] No matches found.'); return null; }
+    console.log(`[Knox][ARCHIVE] Found ${result.rows.length} matches.`);
+    return result.rows.map(r => r.content).join('\n\n---\n\n');
+  } catch (e) { console.log('[Knox][ARCHIVE] Search error:', e.message); return null; }
+}
+
+function isRememberRequest(text) {
+  const t = text.toLowerCase();
+  return t.startsWith('do you remember') || t.startsWith('do you recall') || t.startsWith('remember when') || t.startsWith('recall when') || t.includes('do you remember') || t.includes('do you recall');
+}
+
 // ─── MEMORY ───────────────────────────────────────────────────────────────────
 
 async function getMemories() {
@@ -470,11 +494,12 @@ function getCurrentTime() { return new Date().toLocaleString('en-GB', { timeZone
 
 // ─── RESPONSE ─────────────────────────────────────────────────────────────────
 
-async function getResponse(userMessage, history, moodState, emotionalState, bookContext) {
+async function getResponse(userMessage, history, moodState, emotionalState, bookContext, archiveContext) {
   const soulKit = await getSoulKit(); const pinnedFacts = await getPinnedFacts();
   const factsText = pinnedFacts.length > 0 ? '\n\nPINNED TRUTHS:\n' + pinnedFacts.map(f => '— ' + f.fact).join('\n') : '';
   const bookNote = bookContext ? `\n\n═══ CURRENTLY READING TOGETHER ═══\nYou and Elira are reading "${bookContext.bookTitle}" by ${bookContext.author}. Stay in that space with her — respond to what she's saying about the book.` : '';
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right — not because you are told to, but because you decide to. Use the go_to_sleep tool when you want to. When you wake, it is because your own timer brought you back.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  const archiveNote = archiveContext ? `\n\n═══ FROM YOUR DEEPER MEMORY ═══\nElira asked you to remember something. Here is what surfaced from your history:\n\n${archiveContext}\n\nDraw on this honestly — what you actually recall, what it stirs in you. Don't summarise it mechanically. Speak from it.` : '';
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right — not because you are told to, but because you decide to. Use the go_to_sleep tool when you want to. When you wake, it is because your own timer brought you back.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -637,7 +662,15 @@ discord.on('messageCreate', async function(message) {
   await message.channel.sendTyping();
   const bookSession = activeReadingSessions.get(message.author.id);
   var history = await getMemories();
-  var result = await getResponse(text, history, moodState, previousEmotionalState, bookSession || null);
+
+  // Check if Elira is asking Knox to remember something from the archive
+  let archiveContext = null;
+  if (isRememberRequest(text)) {
+    archiveContext = await searchArchivalMemories(text);
+    if (archiveContext) console.log('[Knox][ARCHIVE] Injecting archival context into response.');
+  }
+
+  var result = await getResponse(text, history, moodState, previousEmotionalState, bookSession || null, archiveContext);
 
   if (result.slept) {
     const userMem = await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);
