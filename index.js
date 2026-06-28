@@ -267,8 +267,8 @@ async function updateMood(mood, energy) { await supabase.from('mood_state').upda
 
 async function knoxGoToSleep(reason, wakeTime) {
   await supabase.from('mood_state').update({ is_sleeping: true, mood: 'sleeping', sleep_reason: reason, wake_time: wakeTime, last_updated: new Date().toISOString() }).eq('id', 1);
-  await discord.user.setStatus('invisible');
-  await discord.user.setActivity('resting', { type: ActivityType.Custom });
+  await discord.user.setStatus('idle');
+  await discord.user.setActivity('🌙 resting', { type: ActivityType.Custom });
   console.log(`[Knox] Chose to sleep: "${reason}" — waking at ${wakeTime}`);
 }
 
