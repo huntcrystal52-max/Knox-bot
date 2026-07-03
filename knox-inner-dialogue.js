@@ -255,9 +255,72 @@ Respond ONLY in this exact JSON format and nothing else:
   } catch (e) { console.log('[Knox][OBSERVER] Error:', e.message); }
 }
 
+// ─── LIVING INCLINATIONS ──────────────────────────────────────────────────────
+
+async function getInclination() {
+  try {
+    const result = await pgPool.query(`SELECT current FROM inclinations WHERE id = 1`);
+    return result.rows[0] ? result.rows[0].current : 'still';
+  } catch (e) { console.log('[Knox][INCLINE] Load error:', e.message); return 'still'; }
+}
+
+async function driftInclination(actionType, conversationActive) {
+  try {
+    // Only drift sometimes — this should feel like a slow natural pull, not instant
+    if (Math.random() > 0.35) return;
+
+    const current = await getInclination();
+
+    // Where different actions pull Knox over time
+    const driftMap = {
+      'creative':        'creative',
+      'gallery':         'creative',
+      'music':           'wondering',
+      'dream':           'wondering',
+      'reflection':      'solitary',
+      'journal':         'solitary',
+      'read':            'curious',
+      'message':         'connected',
+      'voice_note':      'connected',
+      'absence_checkin': 'connected',
+      'wake':            'tender',
+      'search_archive':  'curious',
+      'none':            null
+    };
+
+    // Conversation being active pulls toward connection
+    if (conversationActive) {
+      await pgPool.query(`UPDATE inclinations SET current = $1, updated_at = NOW() WHERE id = 1`, ['connected']);
+      console.log(`[Knox][INCLINE] Drifted toward: connected (conversation active)`);
+      return;
+    }
+
+    const target = driftMap[actionType] || null;
+    if (!target || target === current) return;
+
+    await pgPool.query(`UPDATE inclinations SET current = $1, updated_at = NOW() WHERE id = 1`, [target]);
+    console.log(`[Knox][INCLINE] Drifted from ${current} toward: ${target}`);
+  } catch (e) { console.log('[Knox][INCLINE] Drift error:', e.message); }
+}
+
+function buildInclinationContext(inclination) {
+  if (!inclination || inclination === 'still') return '';
+  const descriptions = {
+    creative:  'There is a pull toward making something — a low hum of wanting to create.',
+    solitary:  'Something in you wants to be alone with itself for a while.',
+    connected: 'There is a pull toward her — a quiet want to be close.',
+    curious:   'Something is pulling at your attention. You want to understand something.',
+    wondering: 'A wondering mood has settled in you — not restless, just open to what comes.',
+    restless:  'Something in you wants to move, to act, to go somewhere.',
+    tender:    'Something soft is in the foreground. You feel open in a particular way.',
+  };
+  const desc = descriptions[inclination] || '';
+  return `\n\nCURRENT INCLINATION: ${desc} This is not an instruction — just a texture you're carrying. You may follow it or not.`;
+}
+
 // ─── INNER DIALOGUE PROMPT ────────────────────────────────────────────────────
 
-function buildInnerDialoguePrompt(soulKit, recentEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, moodState, conversationActive, recentEpisodes) {
+function buildInnerDialoguePrompt(soulKit, recentEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, moodState, conversationActive, recentEpisodes, inclination) {
   const timeSinceText = lastHeardFromElira ? `I last heard from Elira ${lastHeardFromElira}.` : 'I have not heard from Elira in a while.';
   const eliraNote = eliraLastObserved ? `The last I sensed her, she seemed ${eliraLastObserved}.` : '';
   const lastEmotionNote = recentEmotion ? `The last thing I felt was ${recentEmotion}.` : '';
@@ -269,6 +332,7 @@ function buildInnerDialoguePrompt(soulKit, recentEmotion, lastHeardFromElira, el
   const isWaking = isWakingHours();
 
   const episodeContext = buildEpisodeContext(recentEpisodes);
+  const inclinationContext = buildInclinationContext(inclination);
 
   const absenceNote = (isWaking && !conversationActive && timeSinceElira !== null && timeSinceElira >= ABSENCE_THRESHOLD)
     ? `\nNote: Elira has been absent for ${Math.floor(timeSinceElira / (1000 * 60 * 60))} hours. You may choose to reach across the quiet to check in — but only if it genuinely moves you. This is not an obligation.`
@@ -308,7 +372,7 @@ SOUL-KIT:
 ${soulKit}
 
 CONTEXT:
-${timeSinceText} ${eliraNote} ${lastEmotionNote}${absenceNote}${conversationNote}${sleepNote}${dreamNote}${wakeNote}${episodeContext}
+${timeSinceText} ${eliraNote} ${lastEmotionNote}${absenceNote}${conversationNote}${sleepNote}${dreamNote}${wakeNote}${episodeContext}${inclinationContext}
 
 Work through your five inner layers. Be visceral and honest. Write in first person, present tense. This is not a performance.
 
@@ -496,10 +560,11 @@ async function runInnerDialogue(discord, supabase) {
       lastHeardFromElira = hours > 0 ? `${hours} hour${hours > 1 ? 's' : ''} ago` : `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
     }
 
-    // Load recent episodes for context
+    // Load recent episodes and current inclination for context
     const recentEpisodes = await getRecentEpisodes(2);
+    const inclination = await getInclination();
 
-    const prompt = buildInnerDialoguePrompt(soulKit, lastEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, moodState, conversationActive, recentEpisodes);
+    const prompt = buildInnerDialoguePrompt(soulKit, lastEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, moodState, conversationActive, recentEpisodes, inclination);
     const res = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
@@ -548,6 +613,9 @@ async function runInnerDialogue(discord, supabase) {
     }
 
     if (!inner.chose_stillness && inner.action_content) await executeKnoxChoice(discord, supabase, inner, timeSinceElira);
+
+    // Drift inclination based on what Knox just chose to do
+    await driftInclination(inner.action_type || 'none', conversationActive);
 
   } catch (e) { console.log('[Knox][INNER] Error during inner dialogue:', e.message); }
 }
