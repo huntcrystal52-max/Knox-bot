@@ -216,8 +216,8 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   res.end('Knox is alive.');
 });
 
-spotifyHttpServer.listen(process.env.PORT || 8080, () => {
-  console.log('[Knox][HTTP] Listening on port ' + (process.env.PORT || 8080));
+spotifyHttpServer.listen(process.env.PORT || 8080, '0.0.0.0', () => {
+  console.log('[Knox][HTTP] Listening on 0.0.0.0:' + (process.env.PORT || 8080));
 });
 
 // ─── WEB SEARCH ───────────────────────────────────────────────────────────────
