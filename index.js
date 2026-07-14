@@ -223,17 +223,38 @@ spotifyHttpServer.listen(process.env.PORT || 8080, '0.0.0.0', () => {
 async function spotifyApiRequest(endpoint, method, body) {
   const token = await getValidSpotifyAccessToken();
   if (!token) { console.log('[Knox][SPOTIFY] No valid token — not connected yet.'); return null; }
-  try {
-    const res = await fetch('https://api.spotify.com/v1' + endpoint, {
-      method: method || 'GET',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined
-    });
-    if (res.status === 204) return { success: true };
-    if (res.status === 404 && endpoint.includes('currently-playing')) return null;
-    if (!res.ok) { const errText = await res.text(); console.log('[Knox][SPOTIFY] API error:', res.status, errText); return null; }
-    return await res.json();
-  } catch (e) { console.log('[Knox][SPOTIFY] Request error:', e.message); return null; }
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch('https://api.spotify.com/v1' + endpoint, {
+        method: method || 'GET',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      if (res.status === 204) return { success: true };
+      if (res.status === 404 && endpoint.includes('currently-playing')) return null;
+      if (res.status === 401) { console.log('[Knox][SPOTIFY] 401 on', endpoint, '— token rejected.'); return null; }
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get('retry-after') || '2', 10);
+        console.log('[Knox][SPOTIFY] Rate limited on', endpoint, '— waiting', retryAfter, 's');
+        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        continue;
+      }
+      if (res.status >= 500) {
+        const errText = await res.text();
+        console.log(`[Knox][SPOTIFY] ${res.status} on ${endpoint} (attempt ${attempt}/${maxAttempts}):`, errText);
+        if (attempt < maxAttempts) { await new Promise(r => setTimeout(r, attempt * 1000)); continue; }
+        return null;
+      }
+      if (!res.ok) { const errText = await res.text(); console.log(`[Knox][SPOTIFY] ${res.status} on ${endpoint}:`, errText); return null; }
+      return await res.json();
+    } catch (e) {
+      console.log(`[Knox][SPOTIFY] Network error on ${endpoint} (attempt ${attempt}/${maxAttempts}):`, e.message);
+      if (attempt < maxAttempts) { await new Promise(r => setTimeout(r, attempt * 1000)); continue; }
+      return null;
+    }
+  }
+  return null;
 }
 
 async function getCurrentlyPlaying() {
@@ -317,8 +338,16 @@ async function updateKnoxListeningPresence() {
 setInterval(updateKnoxListeningPresence, 25 * 60 * 1000);
 
 function isCurrentlyPlayingRequest(text) {
-  const t = text.toLowerCase();
-  return t.includes("what am i listening to") || t.includes("what's playing") || t.includes('whats playing') || t.includes('check my spotify') || t.includes('what song is this') || (t.includes('what') && t.includes('listening to') && !t.includes('you'));
+  const t = text.toLowerCase().trim();
+  const phrases = [
+    "what am i listening to", "what's playing", "whats playing", "what is playing",
+    "check my spotify", "what song is this", "what's this song", "whats this song",
+    "what track is this", "what am i playing", "what music am i playing",
+    "what am i listening too", "what's on spotify", "check spotify"
+  ];
+  if (phrases.some(p => t.includes(p))) return true;
+  if (t.includes('listening to') && (t.startsWith('what') || t.includes('am i')) && !t.includes('you')) return true;
+  return false;
 }
 
 function parsePlaylistRequest(text) {
