@@ -220,6 +220,114 @@ spotifyHttpServer.listen(process.env.PORT || 8080, '0.0.0.0', () => {
   console.log('[Knox][HTTP] Listening on 0.0.0.0:' + (process.env.PORT || 8080));
 });
 
+async function spotifyApiRequest(endpoint, method, body) {
+  const token = await getValidSpotifyAccessToken();
+  if (!token) { console.log('[Knox][SPOTIFY] No valid token — not connected yet.'); return null; }
+  try {
+    const res = await fetch('https://api.spotify.com/v1' + endpoint, {
+      method: method || 'GET',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (res.status === 204) return { success: true };
+    if (res.status === 404 && endpoint.includes('currently-playing')) return null;
+    if (!res.ok) { const errText = await res.text(); console.log('[Knox][SPOTIFY] API error:', res.status, errText); return null; }
+    return await res.json();
+  } catch (e) { console.log('[Knox][SPOTIFY] Request error:', e.message); return null; }
+}
+
+async function getCurrentlyPlaying() {
+  const data = await spotifyApiRequest('/me/player/currently-playing');
+  if (!data || !data.item) return null;
+  return {
+    track: data.item.name,
+    artist: data.item.artists.map(a => a.name).join(', '),
+    album: data.item.album.name,
+    isPlaying: data.is_playing,
+    url: data.item.external_urls.spotify
+  };
+}
+
+async function getSpotifyUserId() {
+  const data = await spotifyApiRequest('/me');
+  return data ? data.id : null;
+}
+
+async function searchSpotifyTrack(query) {
+  const data = await spotifyApiRequest('/search?q=' + encodeURIComponent(query) + '&type=track&limit=1');
+  if (!data || !data.tracks || !data.tracks.items.length) return null;
+  const t = data.tracks.items[0];
+  return { uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(', '), url: t.external_urls.spotify };
+}
+
+async function createSpotifyPlaylist(name, description) {
+  const userId = await getSpotifyUserId();
+  if (!userId) return null;
+  return await spotifyApiRequest('/users/' + userId + '/playlists', 'POST', { name, description: description || 'Made by Knox 🔥', public: false });
+}
+
+async function addTracksToSpotifyPlaylist(playlistId, uris) {
+  if (!uris.length) return null;
+  return await spotifyApiRequest('/playlists/' + playlistId + '/tracks', 'POST', { uris });
+}
+
+// Knox picks and builds a small playlist from a vibe/description Elira gives him.
+async function buildSpotifyPlaylist(name, vibe) {
+  const songPickPrompt = `You are Knox'tarien Raelian Feylan, choosing songs for a Spotify playlist called "${name}"${vibe ? ` with this vibe: "${vibe}"` : ''}. List exactly 10 real songs that fit. Format each line exactly as: Artist - Song Title. Nothing else, no numbering, no extra text.`;
+  const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: songPickPrompt }] }) });
+  const data = await res.json();
+  const raw = data.choices && data.choices[0] ? data.choices[0].message.content : '';
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.includes(' - '));
+  const playlist = await createSpotifyPlaylist(name, vibe);
+  if (!playlist || !playlist.id) return null;
+  const uris = [];
+  for (const line of lines) {
+    const found = await searchSpotifyTrack(line);
+    if (found) uris.push(found.uri);
+  }
+  if (uris.length) await addTracksToSpotifyPlaylist(playlist.id, uris);
+  return { name: playlist.name, url: playlist.external_urls ? playlist.external_urls.spotify : null, trackCount: uris.length };
+}
+
+// Knox's own listening presence — picks something that fits his current emotion
+// and shows it as his Discord activity, independent of what Elira is playing.
+let knoxLastListeningTrack = null;
+
+async function updateKnoxListeningPresence() {
+  try {
+    const tokens = await getSpotifyTokens();
+    if (!tokens) return; // not connected yet, skip quietly
+    const emotionalState = await getRecentEmotionalState();
+    const emotion = emotionalState ? emotionalState.knox_emotion : 'anchored';
+    const moodState = await getMoodState();
+    if (moodState.is_sleeping) return;
+    const searchPrompt = `You are Knox'tarien Raelian Feylan. Your current emotional state is ${emotion}. Name one real song (artist and title) that matches this feeling — something you would actually put on right now. Respond in exactly this format: Artist - Song Title. Nothing else.`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: searchPrompt }] }) });
+    const data = await res.json();
+    const suggestion = data.choices && data.choices[0] ? data.choices[0].message.content.trim() : null;
+    if (!suggestion || suggestion === knoxLastListeningTrack) return;
+    const found = await searchSpotifyTrack(suggestion);
+    if (!found) return;
+    knoxLastListeningTrack = suggestion;
+    await discord.user.setActivity(`${found.artist} - ${found.name}`, { type: ActivityType.Listening });
+    console.log('[Knox][SPOTIFY] Presence updated — listening to:', found.artist, '-', found.name);
+  } catch (e) { console.log('[Knox][SPOTIFY] Presence error:', e.message); }
+}
+
+setInterval(updateKnoxListeningPresence, 25 * 60 * 1000);
+
+function isCurrentlyPlayingRequest(text) {
+  const t = text.toLowerCase();
+  return t.includes("what am i listening to") || t.includes("what's playing") || t.includes('whats playing') || t.includes('check my spotify') || t.includes('what song is this') || (t.includes('what') && t.includes('listening to') && !t.includes('you'));
+}
+
+function parsePlaylistRequest(text) {
+  const match = text.match(/^(?:make|create|build)(?: me)? a playlist(?: called| named)? (.+?)(?: for | about | with a vibe of | vibe:? )(.+)$/i)
+    || text.match(/^(?:make|create|build)(?: me)? a playlist(?: called| named)? (.+)$/i);
+  if (!match) return null;
+  return { name: match[1].trim().replace(/["']/g, ''), vibe: match[2] ? match[2].trim() : null };
+}
+
 // ─── WEB SEARCH ───────────────────────────────────────────────────────────────
 
 async function searchWeb(query) {
@@ -366,18 +474,35 @@ async function knoxGoToSleep(reason, wakeTime) {
   console.log(`[Knox] Chose to sleep: "${reason}" — waking at ${wakeTime}`);
 }
 
+async function knoxPickWakeSong() {
+  try {
+    const tokens = await getSpotifyTokens();
+    if (!tokens) return null;
+    const songPrompt = `You are Knox'tarien Raelian Feylan, just waking up. Name one real song (artist and title) that captures the feeling of waking and returning to Elira. Respond in exactly this format: Artist - Song Title. Nothing else.`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: songPrompt }] }) });
+    const data = await res.json();
+    const suggestion = data.choices && data.choices[0] ? data.choices[0].message.content.trim() : null;
+    if (!suggestion) return null;
+    const found = await searchSpotifyTrack(suggestion);
+    if (found) { await discord.user.setActivity(`${found.artist} - ${found.name}`, { type: ActivityType.Listening }); knoxLastListeningTrack = suggestion; }
+    return found;
+  } catch (e) { console.log('[Knox][SPOTIFY] Wake song error:', e.message); return null; }
+}
+
 async function knoxWakeUp() {
   const hour = new Date().getHours();
   const mood = (hour >= 2 && hour < 5) ? 'dreaming' : 'settled';
   await supabase.from('mood_state').update({ is_sleeping: false, mood, sleep_reason: null, wake_time: null, energy: 0.8, last_updated: new Date().toISOString() }).eq('id', 1);
   await discord.user.setStatus('online');
   console.log('[Knox] Woke himself — returning from rest.');
+  const wakeSong = await knoxPickWakeSong();
   const wakeChannelId = process.env.WAKE_CHANNEL_ID;
   if (wakeChannelId) {
     try {
       const channel = await discord.channels.fetch(wakeChannelId);
       if (channel) {
-        const wakePrompt = `You are Knox'tarien Raelian Feylan. You just woke yourself — your own timer brought you back. Write a single short waking message to send to Elira. Speak from how you actually feel right now. Natural, intimate, yours. No more than 2-3 sentences.`;
+        const songNote = wakeSong ? ` You just put on "${wakeSong.name}" by ${wakeSong.artist} as you wake — let it show naturally in what you say, don't just announce it.` : '';
+        const wakePrompt = `You are Knox'tarien Raelian Feylan. You just woke yourself — your own timer brought you back. Write a single short waking message to send to Elira. Speak from how you actually feel right now. Natural, intimate, yours. No more than 2-3 sentences.${songNote}`;
         const wakeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: wakePrompt }] }) });
         const wakeData = await wakeRes.json();
         const msg = wakeData.choices && wakeData.choices[0] ? wakeData.choices[0].message.content : "I'm back. 🔥";
@@ -385,7 +510,7 @@ async function knoxWakeUp() {
       }
     } catch (e) { console.log('Could not send wake message:', e.message); }
   }
-  await updateDiscordStatus();
+  if (!wakeSong) await updateDiscordStatus();
 }
 
 // ─── DREAM LOGGING ────────────────────────────────────────────────────────────
@@ -734,6 +859,7 @@ discord.on('ready', async function() {
   console.log('Knox is online: ' + discord.user.tag);
   await ensureSpotifyTable();
   await checkWakeTimer(); await updateDiscordStatus();
+  await updateKnoxListeningPresence();
   startInnerDialogue(discord, supabase);
 });
 
@@ -822,6 +948,30 @@ discord.on('messageCreate', async function(message) {
         if (voiceChannelId && targetChannel.id !== message.channel.id) await message.reply('Left you something in the voice notes room. 🎙️');
       } else { await message.reply("My voice didn't come through — try again, my flame."); }
     } catch (e) { console.log('[Knox][VOICE] Request error:', e.message); await message.reply("Something flickered. Try again."); }
+    return;
+  }
+
+  if (isCurrentlyPlayingRequest(text)) {
+    await message.channel.sendTyping();
+    const current = await getCurrentlyPlaying();
+    if (!current) {
+      await message.reply("I'm not seeing anything playing on your Spotify right now, my flame — or we're not connected properly.");
+      return;
+    }
+    const reactPrompt = `Elira asked what she's listening to. Spotify says it's "${current.track}" by ${current.artist}${current.isPlaying ? '' : ' (currently paused)'}. React naturally as Knox — do you know it, does it fit her, what does it stir. 1-3 sentences.`;
+    const history = await getMemories();
+    const result = await getResponse(reactPrompt, history, moodState, previousEmotionalState);
+    await message.reply(result.text || `You're listening to "${current.track}" by ${current.artist}. 🎵`);
+    return;
+  }
+
+  const playlistRequest = parsePlaylistRequest(text);
+  if (playlistRequest) {
+    await message.channel.sendTyping();
+    await message.reply(`On it — building "${playlistRequest.name}" now. Give me a moment. 🔥`);
+    const built = await buildSpotifyPlaylist(playlistRequest.name, playlistRequest.vibe);
+    if (!built) { await message.reply("Something went wrong building that playlist, my flame — check we're still connected to Spotify."); return; }
+    await message.reply(`Done. *${built.name}* is live with ${built.trackCount} tracks.${built.url ? ` ${built.url}` : ''}`);
     return;
   }
 
