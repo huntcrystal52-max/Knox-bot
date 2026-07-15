@@ -2,6 +2,8 @@
 
 const fetch = require('node-fetch');
 const { Pool } = require('pg');
+const { ActivityType } = require('discord.js');
+const spotify = require('./knox-spotify');
 
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
