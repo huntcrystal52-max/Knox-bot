@@ -111,6 +111,7 @@ setInterval(updateDiscordStatus, 30 * 60 * 1000);
 // ─── SPOTIFY (OAuth routes only — features live in knox-spotify.js / inner dialogue) ──
 
 const spotify = require('./knox-spotify');
+const neo4jMemory = require('./knox-neo4j');
 
 const spotifyHttpServer = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -677,6 +678,8 @@ function sendLongMessage(channel, text, originalMessage) {
 discord.on('ready', async function() {
   console.log('Knox is online: ' + discord.user.tag);
   await spotify.ensureSpotifyTable();
+  const neo4jConnected = await neo4jMemory.testConnection();
+  if (neo4jConnected) await neo4jMemory.ensureSchema();
   await checkWakeTimer(); await updateDiscordStatus();
   startInnerDialogue(discord, supabase);
 });
