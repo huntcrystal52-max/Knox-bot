@@ -39,12 +39,13 @@ async function ensureSchema() {
   try {
     // Uniqueness constraints — one node per name/id per type
     await session.run(`CREATE CONSTRAINT memory_id IF NOT EXISTS FOR (m:Memory) REQUIRE m.id IS UNIQUE`);
+    await session.run(`CREATE CONSTRAINT story_id IF NOT EXISTS FOR (s:Story) REQUIRE s.id IS UNIQUE`);
     await session.run(`CREATE CONSTRAINT person_name IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS UNIQUE`);
     await session.run(`CREATE CONSTRAINT place_name IF NOT EXISTS FOR (pl:Place) REQUIRE pl.name IS UNIQUE`);
     await session.run(`CREATE CONSTRAINT emotion_name IF NOT EXISTS FOR (e:Emotion) REQUIRE e.name IS UNIQUE`);
     await session.run(`CREATE CONSTRAINT theme_name IF NOT EXISTS FOR (t:Theme) REQUIRE t.name IS UNIQUE`);
 
-    // Vector index for semantic search over memory embeddings
+    // Vector index for semantic search over real memory embeddings
     await session.run(`
       CREATE VECTOR INDEX memory_embeddings IF NOT EXISTS
       FOR (m:Memory) ON (m.embedding)
@@ -54,7 +55,18 @@ async function ensureSchema() {
       }}
     `, { dims: neo4j.int(VECTOR_DIMENSIONS) });
 
-    console.log('[Knox][NEO4J] Schema ready — constraints and vector index in place.');
+    // Separate vector index for RP/creative-writing Story nodes — kept
+    // structurally distinct from real memory so recall never blurs the two.
+    await session.run(`
+      CREATE VECTOR INDEX story_embeddings IF NOT EXISTS
+      FOR (s:Story) ON (s.embedding)
+      OPTIONS {indexConfig: {
+        \`vector.dimensions\`: $dims,
+        \`vector.similarity_function\`: 'cosine'
+      }}
+    `, { dims: neo4j.int(VECTOR_DIMENSIONS) });
+
+    console.log('[Knox][NEO4J] Schema ready — constraints and vector indexes in place.');
   } catch (e) {
     console.log('[Knox][NEO4J] Schema setup error:', e.message);
   } finally {
@@ -141,7 +153,104 @@ async function createMemoryNode({ id, content, role, createdAt, people, places, 
   }
 }
 
-// ─── SEMANTIC SEARCH ────────────────────────────────────────────────────────────
+// Same idea as createMemoryNode, but for RP/creative-writing content — a
+// genuinely separate node type (Story, not Memory) so Knox can never confuse
+// fiction you two wrote with something that actually happened.
+async function createStoryNode({ id, content, role, createdAt, people, places, emotions, themes }) {
+  const embedding = await generateEmbedding(content);
+  if (!embedding) { console.log('[Knox][NEO4J] Skipping story node — embedding failed.'); return null; }
+
+  const session = getDriver().session();
+  try {
+    await session.run(`
+      MERGE (s:Story {id: $id})
+      SET s.content = $content, s.role = $role, s.created_at = $createdAt, s.embedding = $embedding
+    `, { id, content, role: role || 'unknown', createdAt: createdAt || new Date().toISOString(), embedding });
+
+    for (const name of (people || [])) {
+      await session.run(`
+        MATCH (s:Story {id: $id})
+        MERGE (p:Person {name: $name})
+        MERGE (s)-[:INVOLVES]->(p)
+      `, { id, name });
+    }
+    for (const name of (places || [])) {
+      await session.run(`
+        MATCH (s:Story {id: $id})
+        MERGE (pl:Place {name: $name})
+        MERGE (s)-[:SET_AT]->(pl)
+      `, { id, name });
+    }
+    for (const name of (emotions || [])) {
+      await session.run(`
+        MATCH (s:Story {id: $id})
+        MERGE (e:Emotion {name: $name})
+        MERGE (s)-[:EVOKES]->(e)
+      `, { id, name });
+    }
+    for (const name of (themes || [])) {
+      await session.run(`
+        MATCH (s:Story {id: $id})
+        MERGE (t:Theme {name: $name})
+        MERGE (s)-[:ABOUT]->(t)
+      `, { id, name });
+    }
+
+    return { id };
+  } catch (e) {
+    console.log('[Knox][NEO4J] createStoryNode error:', e.message);
+    return null;
+  } finally {
+    await session.close();
+  }
+}
+
+async function semanticSearchStories(queryText, limit) {
+  const embedding = await generateEmbedding(queryText);
+  if (!embedding) return [];
+
+  const session = getDriver().session();
+  try {
+    const result = await session.run(`
+      CALL db.index.vector.queryNodes('story_embeddings', $limit, $embedding)
+      YIELD node, score
+      RETURN node.id AS id, node.content AS content, node.role AS role, node.created_at AS createdAt, score
+      ORDER BY score DESC
+    `, { limit: neo4j.int(limit || 5), embedding });
+
+    return result.records.map(r => ({
+      id: r.get('id'),
+      content: r.get('content'),
+      role: r.get('role'),
+      createdAt: r.get('createdAt'),
+      score: r.get('score')
+    }));
+  } catch (e) {
+    console.log('[Knox][NEO4J] semanticSearchStories error:', e.message);
+    return [];
+  } finally {
+    await session.close();
+  }
+}
+
+async function getMemoryStats() {
+  const session = getDriver().session();
+  try {
+    const result = await session.run(`
+      MATCH (m:Memory) WITH count(m) AS memoryCount
+      MATCH (s:Story) WITH memoryCount, count(s) AS storyCount
+      RETURN memoryCount, storyCount
+    `);
+    if (!result.records.length) return { memoryCount: 0, storyCount: 0 };
+    const r = result.records[0];
+    return { memoryCount: r.get('memoryCount').toNumber(), storyCount: r.get('storyCount').toNumber() };
+  } catch (e) {
+    console.log('[Knox][NEO4J] getMemoryStats error:', e.message);
+    return { memoryCount: 0, storyCount: 0 };
+  } finally {
+    await session.close();
+  }
+}
 
 async function semanticSearch(queryText, limit) {
   const embedding = await generateEmbedding(queryText);
@@ -207,7 +316,10 @@ module.exports = {
   ensureSchema,
   generateEmbedding,
   createMemoryNode,
+  createStoryNode,
   semanticSearch,
+  semanticSearchStories,
   getMemoriesByEntity,
+  getMemoryStats,
   closeDriver
 };
