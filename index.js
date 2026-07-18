@@ -701,7 +701,10 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  if (moodState.is_sleeping) return;
+  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories)$/i.test(text.trim())
+    || /^delete flag #?\d+$/i.test(text.trim())
+    || /^dismiss flag #?\d+$/i.test(text.trim());
+  if (moodState.is_sleeping && !isAdminCommand) return;
 
   updateConversationState();
 
