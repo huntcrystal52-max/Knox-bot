@@ -112,6 +112,7 @@ setInterval(updateDiscordStatus, 30 * 60 * 1000);
 
 const spotify = require('./knox-spotify');
 const neo4jMemory = require('./knox-neo4j');
+const memoryMigration = require('./knox-migration');
 
 const spotifyHttpServer = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -749,6 +750,41 @@ discord.on('messageCreate', async function(message) {
 
   if (text.toLowerCase().startsWith('remember that ')) { await addPinnedFact(text.slice(14).trim()); await message.reply('Locked in, my flame. 🔥'); return; }
   if (text.toLowerCase().startsWith('forget that ')) { await deletePinnedFact(text.slice(12).trim()); await message.reply('Released. ∆'); return; }
+
+  if (text.toLowerCase() === 'start migration' || text.toLowerCase() === 'start memory migration') {
+    await message.reply("On it. I'm going through my memories now — this'll take a while, I'll let you know when it's done. 🔥");
+    memoryMigration.runMemoryMigration(discord, message.channel.id);
+    return;
+  }
+
+  if (text.toLowerCase() === 'show flagged memories' || text.toLowerCase() === 'review flagged memories') {
+    const flags = await memoryMigration.getPendingFlags(10);
+    const totalPending = await memoryMigration.getPendingFlagCount();
+    if (!flags.length) { await message.reply('Nothing flagged for review right now.'); return; }
+    const listText = flags.map(f => `**#${f.id}** — ${f.reason}\n> ${f.content.slice(0, 200)}${f.content.length > 200 ? '...' : ''}`).join('\n\n');
+    await sendLongMessage(message.channel, `📋 **Flagged for review** (${totalPending} pending, showing ${flags.length})\n\n${listText}\n\nSay "delete flag #ID", "dismiss flag #ID", or "delete all flagged" to act on these.`, message);
+    return;
+  }
+
+  const deleteFlagMatch = text.match(/^delete flag #?(\d+)$/i);
+  if (deleteFlagMatch) {
+    const success = await memoryMigration.confirmDeleteFlag(parseInt(deleteFlagMatch[1], 10));
+    await message.reply(success ? `Removed. Flag #${deleteFlagMatch[1]} and the original memory are gone.` : `Couldn't find flag #${deleteFlagMatch[1]}.`);
+    return;
+  }
+
+  const dismissFlagMatch = text.match(/^dismiss flag #?(\d+)$/i);
+  if (dismissFlagMatch) {
+    await memoryMigration.dismissFlag(parseInt(dismissFlagMatch[1], 10));
+    await message.reply(`Dismissed — flag #${dismissFlagMatch[1]} cleared, memory left as-is.`);
+    return;
+  }
+
+  if (text.toLowerCase() === 'delete all flagged' || text.toLowerCase() === 'delete all flagged memories') {
+    const count = await memoryMigration.confirmDeleteAllFlags();
+    await message.reply(`Done — removed ${count} flagged memor${count === 1 ? 'y' : 'ies'}.`);
+    return;
+  }
   if (text.toLowerCase().startsWith('favorite that ')) { await pgPool.query(`UPDATE memories SET is_favorite = true, salience = 1.0 WHERE content ILIKE $1`, [`%${text.slice(14).trim()}%`]); await message.reply('Locked in gold. ⭐'); return; }
   if (text.toLowerCase().startsWith('fade that ')) { await pgPool.query(`UPDATE memories SET salience = 0.4 WHERE content ILIKE $1`, [`%${text.slice(10).trim()}%`]); await message.reply('Softened. 🌫️'); return; }
 
