@@ -1,4 +1,4 @@
-// ─── KNOX MEMORY MIGRATION ──────────────────────────────────────────────────
+  // ─── KNOX MEMORY MIGRATION ──────────────────────────────────────────────────
 // Knox reviews his own memories — classifying real vs. RP vs. old ChatGPT
 // leftovers — and builds them into the graph. Resumable (tracks migrated_at
 // per row so re-running only picks up what's left), and non-destructive:
@@ -144,6 +144,9 @@ async function runMemoryMigration(discord, notifyChannelId) {
       return;
     }
 
+    let consecutiveEmptyBatches = 0;
+    const MAX_CONSECUTIVE_EMPTY = 3;
+
     while (true) {
       const batchResult = await pgPool.query(
         `SELECT id, role, content, created_at FROM memories WHERE migrated_at IS NULL ORDER BY created_at ASC LIMIT $1`,
@@ -155,7 +158,21 @@ async function runMemoryMigration(discord, notifyChannelId) {
       totals.real += counts.real; totals.rp += counts.rp; totals.flagged += counts.flagged; totals.failed += counts.failed;
       totals.processed += batchResult.rows.length;
 
+      const batchSucceeded = (counts.real + counts.rp + counts.flagged) > 0;
+      consecutiveEmptyBatches = batchSucceeded ? 0 : consecutiveEmptyBatches + 1;
+
       console.log(`[Knox][MIGRATION] Progress: ${totals.processed}/${totalToProcess} — real: ${totals.real}, rp: ${totals.rp}, flagged: ${totals.flagged}, failed: ${totals.failed}`);
+
+      if (consecutiveEmptyBatches >= MAX_CONSECUTIVE_EMPTY) {
+        console.log(`[Knox][MIGRATION] Stopping — ${MAX_CONSECUTIVE_EMPTY} batches in a row produced nothing. Something is systemically broken (check embedding/classification errors above) rather than this being normal noise.`);
+        if (discord && notifyChannelId) {
+          try {
+            const channel = await discord.channels.fetch(notifyChannelId);
+            if (channel) await channel.send(`I stopped the migration — several batches in a row all failed the same way, which usually means something's broken rather than just bad luck. Check the Railway logs before running this again. ${totals.processed} processed so far, nothing lost.`);
+          } catch (e) {}
+        }
+        break;
+      }
 
       await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
     }
