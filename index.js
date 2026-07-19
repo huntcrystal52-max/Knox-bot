@@ -760,6 +760,12 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
+  if (text.toLowerCase() === 'reset migration') {
+    const count = await memoryMigration.resetMigration();
+    await message.reply(`Reset — ${count} memor${count === 1 ? 'y' : 'ies'} marked for reprocessing. Say "start migration" to run it again.`);
+    return;
+  }
+
   if (text.toLowerCase() === 'show flagged memories' || text.toLowerCase() === 'review flagged memories') {
     const flags = await memoryMigration.getPendingFlags(10);
     const totalPending = await memoryMigration.getPendingFlagCount();
