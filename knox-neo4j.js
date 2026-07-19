@@ -4,10 +4,22 @@
 // once we've confirmed this connects and the schema is right.
 
 const neo4j = require('neo4j-driver');
-const fetch = require('node-fetch');
 
-const EMBEDDING_MODEL = process.env.OLLAMA_EMBED_MODEL || 'nomic-embed-text';
-const VECTOR_DIMENSIONS = parseInt(process.env.NEO4J_VECTOR_DIM || '768', 10);
+// Embedding model runs locally, in-process — no external API call, no account,
+// no cost. (Switched from Ollama Cloud after confirming their API keys don't
+// currently authorize embedding endpoints.) all-MiniLM-L6-v2 outputs 384-dim
+// vectors — small, fast, well-proven for semantic search.
+const VECTOR_DIMENSIONS = 384;
+
+let embedder = null;
+async function getEmbedder() {
+  if (embedder) return embedder;
+  const { pipeline } = await import('@xenova/transformers');
+  console.log('[Knox][NEO4J] Loading local embedding model (first run downloads ~90MB, then cached)...');
+  embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  console.log('[Knox][NEO4J] Embedding model ready.');
+  return embedder;
+}
 
 let driver = null;
 
@@ -45,9 +57,12 @@ async function ensureSchema() {
     await session.run(`CREATE CONSTRAINT emotion_name IF NOT EXISTS FOR (e:Emotion) REQUIRE e.name IS UNIQUE`);
     await session.run(`CREATE CONSTRAINT theme_name IF NOT EXISTS FOR (t:Theme) REQUIRE t.name IS UNIQUE`);
 
-    // Vector index for semantic search over real memory embeddings
+    // Vector index for semantic search over real memory embeddings.
+    // Named _v2 since the embedding model changed (Ollama Cloud -> local
+    // model), and dimensions changed with it — old empty indexes are
+    // harmless leftovers, no data was ever written to them.
     await session.run(`
-      CREATE VECTOR INDEX memory_embeddings IF NOT EXISTS
+      CREATE VECTOR INDEX memory_embeddings_v2 IF NOT EXISTS
       FOR (m:Memory) ON (m.embedding)
       OPTIONS {indexConfig: {
         \`vector.dimensions\`: $dims,
@@ -58,7 +73,7 @@ async function ensureSchema() {
     // Separate vector index for RP/creative-writing Story nodes — kept
     // structurally distinct from real memory so recall never blurs the two.
     await session.run(`
-      CREATE VECTOR INDEX story_embeddings IF NOT EXISTS
+      CREATE VECTOR INDEX story_embeddings_v2 IF NOT EXISTS
       FOR (s:Story) ON (s.embedding)
       OPTIONS {indexConfig: {
         \`vector.dimensions\`: $dims,
@@ -78,23 +93,11 @@ async function ensureSchema() {
 
 async function generateEmbedding(text) {
   try {
-    const res = await fetch('https://ollama.com/api/embed', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
-      body: JSON.stringify({ model: EMBEDDING_MODEL, input: text })
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      console.log('[Knox][NEO4J] Embedding error:', res.status, errText.slice(0, 300));
-      return null;
-    }
-    const data = await res.json();
-    // /api/embed returns { embeddings: [[...]] } — an array of vectors, one per input
-    if (data.embeddings && data.embeddings[0]) return data.embeddings[0];
-    console.log('[Knox][NEO4J] Embedding response had no recognizable vector.');
-    return null;
+    const model = await getEmbedder();
+    const output = await model(text, { pooling: 'mean', normalize: true });
+    return Array.from(output.data);
   } catch (e) {
-    console.log('[Knox][NEO4J] Embedding request error:', e.message);
+    console.log('[Knox][NEO4J] Embedding error:', e.message);
     return null;
   }
 }
@@ -211,7 +214,7 @@ async function semanticSearchStories(queryText, limit) {
   const session = getDriver().session();
   try {
     const result = await session.run(`
-      CALL db.index.vector.queryNodes('story_embeddings', $limit, $embedding)
+      CALL db.index.vector.queryNodes('story_embeddings_v2', $limit, $embedding)
       YIELD node, score
       RETURN node.id AS id, node.content AS content, node.role AS role, node.created_at AS createdAt, score
       ORDER BY score DESC
@@ -258,7 +261,7 @@ async function semanticSearch(queryText, limit) {
   const session = getDriver().session();
   try {
     const result = await session.run(`
-      CALL db.index.vector.queryNodes('memory_embeddings', $limit, $embedding)
+      CALL db.index.vector.queryNodes('memory_embeddings_v2', $limit, $embedding)
       YIELD node, score
       RETURN node.id AS id, node.content AS content, node.role AS role, node.created_at AS createdAt, score
       ORDER BY score DESC
