@@ -702,9 +702,7 @@ discord.on('messageCreate', async function(message) {
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
   const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags)$/i.test(text.trim())
-    || /^delete(?: flag)? #?\d+$/i.test(text.trim())
-    || /^dismiss(?: flag)? #?\d+$/i.test(text.trim())
-    || /^restore(?: flag)? #?\d+$/i.test(text.trim());
+    || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
   updateConversationState();
@@ -788,17 +786,30 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
-  const deleteFlagMatch = text.match(/^delete(?: flag)? #?(\d+)$/i);
-  if (deleteFlagMatch) {
-    const success = await memoryMigration.confirmDeleteFlag(parseInt(deleteFlagMatch[1], 10));
-    await message.reply(success ? `Removed. Flag #${deleteFlagMatch[1]} and the original memory are gone. Say "restore flag #${deleteFlagMatch[1]}" if you change your mind.` : `Couldn't find a pending flag #${deleteFlagMatch[1]} — check "show flagged memories" for valid IDs.`);
-    return;
-  }
-
-  const dismissFlagMatch = text.match(/^dismiss(?: flag)? #?(\d+)$/i);
-  if (dismissFlagMatch) {
-    await memoryMigration.dismissFlag(parseInt(dismissFlagMatch[1], 10));
-    await message.reply(`Dismissed — flag #${dismissFlagMatch[1]} cleared, memory left as-is.`);
+  // Handles messages like "delete #1,2,5,6. dismiss #3,4,7,8,9,10" — multiple
+  // IDs, and multiple actions, all in one message.
+  const flagActionSegments = [...text.matchAll(/(delete|dismiss)\s*#?id?s?\.?\s*[:]?\s*([\d,.\s;]+?)(?=(?:delete|dismiss)\b|$)/gi)];
+  const looksLikeFlagAction = /^(delete|dismiss)\b/i.test(text.trim()) && /\d/.test(text) && flagActionSegments.length > 0;
+  if (looksLikeFlagAction) {
+    const deletedIds = []; const dismissedIds = []; const notFoundIds = [];
+    for (const seg of flagActionSegments) {
+      const action = seg[1].toLowerCase();
+      const ids = [...seg[2].matchAll(/\d+/g)].map(m => parseInt(m[0], 10));
+      for (const id of ids) {
+        if (action === 'delete') {
+          const success = await memoryMigration.confirmDeleteFlag(id);
+          if (success) deletedIds.push(id); else notFoundIds.push(id);
+        } else {
+          await memoryMigration.dismissFlag(id);
+          dismissedIds.push(id);
+        }
+      }
+    }
+    let reply = '';
+    if (deletedIds.length) reply += `Deleted: ${deletedIds.map(i => '#' + i).join(', ')}\n`;
+    if (dismissedIds.length) reply += `Dismissed: ${dismissedIds.map(i => '#' + i).join(', ')}\n`;
+    if (notFoundIds.length) reply += `Couldn't find pending flags: ${notFoundIds.map(i => '#' + i).join(', ')}\n`;
+    await message.reply(reply.trim() || "Nothing matched those IDs, my flame — check \"show flagged memories\" for valid ones.");
     return;
   }
 
@@ -824,10 +835,18 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
-  const restoreFlagMatch = text.match(/^restore(?: flag)? #?(\d+)$/i);
-  if (restoreFlagMatch) {
-    const result = await memoryMigration.restoreFlag(parseInt(restoreFlagMatch[1], 10));
-    await message.reply(result ? `Restored — back in the pending review queue as a fresh entry.` : `Couldn't find a deleted flag #${restoreFlagMatch[1]}.`);
+  const restoreBatchMatch = text.trim().match(/^restore\s*#?id?s?\.?\s*[:]?\s*[\d,\s]+$/i);
+  if (restoreBatchMatch) {
+    const ids = [...text.matchAll(/\d+/g)].map(m => parseInt(m[0], 10));
+    const restoredIds = []; const notFoundIds = [];
+    for (const id of ids) {
+      const result = await memoryMigration.restoreFlag(id);
+      if (result) restoredIds.push(id); else notFoundIds.push(id);
+    }
+    let reply = '';
+    if (restoredIds.length) reply += `Restored: ${restoredIds.map(i => '#' + i).join(', ')} — back in the pending review queue.\n`;
+    if (notFoundIds.length) reply += `Couldn't find deleted flags: ${notFoundIds.map(i => '#' + i).join(', ')}\n`;
+    await message.reply(reply.trim());
     return;
   }
 
