@@ -701,9 +701,10 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|reset migration|migration status)$/i.test(text.trim())
-    || /^delete flag #?\d+$/i.test(text.trim())
-    || /^dismiss flag #?\d+$/i.test(text.trim());
+  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags)$/i.test(text.trim())
+    || /^delete(?: flag)? #?\d+$/i.test(text.trim())
+    || /^dismiss(?: flag)? #?\d+$/i.test(text.trim())
+    || /^restore(?: flag)? #?\d+$/i.test(text.trim());
   if (moodState.is_sleeping && !isAdminCommand) return;
 
   updateConversationState();
@@ -783,18 +784,18 @@ discord.on('messageCreate', async function(message) {
     const totalPending = await memoryMigration.getPendingFlagCount();
     if (!flags.length) { await message.reply('Nothing flagged for review right now.'); return; }
     const listText = flags.map(f => `**#${f.id}** — ${f.reason}\n> ${f.content.slice(0, 200)}${f.content.length > 200 ? '...' : ''}`).join('\n\n');
-    await sendLongMessage(message.channel, `📋 **Flagged for review** (${totalPending} pending, showing ${flags.length})\n\n${listText}\n\nSay "delete flag #ID", "dismiss flag #ID", or "delete all flagged" to act on these.`, message);
+    await sendLongMessage(message.channel, `📋 **Flagged for review** (${totalPending} pending, showing ${flags.length})\n\n${listText}\n\nSay "delete #ID" or "dismiss #ID" for individual ones, or "delete all flagged" to review deleting everything pending (this asks for confirmation before anything happens).`, message);
     return;
   }
 
-  const deleteFlagMatch = text.match(/^delete flag #?(\d+)$/i);
+  const deleteFlagMatch = text.match(/^delete(?: flag)? #?(\d+)$/i);
   if (deleteFlagMatch) {
     const success = await memoryMigration.confirmDeleteFlag(parseInt(deleteFlagMatch[1], 10));
-    await message.reply(success ? `Removed. Flag #${deleteFlagMatch[1]} and the original memory are gone.` : `Couldn't find flag #${deleteFlagMatch[1]}.`);
+    await message.reply(success ? `Removed. Flag #${deleteFlagMatch[1]} and the original memory are gone. Say "restore flag #${deleteFlagMatch[1]}" if you change your mind.` : `Couldn't find a pending flag #${deleteFlagMatch[1]} — check "show flagged memories" for valid IDs.`);
     return;
   }
 
-  const dismissFlagMatch = text.match(/^dismiss flag #?(\d+)$/i);
+  const dismissFlagMatch = text.match(/^dismiss(?: flag)? #?(\d+)$/i);
   if (dismissFlagMatch) {
     await memoryMigration.dismissFlag(parseInt(dismissFlagMatch[1], 10));
     await message.reply(`Dismissed — flag #${dismissFlagMatch[1]} cleared, memory left as-is.`);
@@ -802,8 +803,37 @@ discord.on('messageCreate', async function(message) {
   }
 
   if (text.toLowerCase() === 'delete all flagged' || text.toLowerCase() === 'delete all flagged memories') {
+    const totalPending = await memoryMigration.getPendingFlagCount();
+    if (!totalPending) { await message.reply('Nothing pending to delete right now.'); return; }
+    await message.reply(`This permanently deletes ${totalPending} flagged memor${totalPending === 1 ? 'y' : 'ies'} from the original source — not just the flag. Say "yes delete all flagged" to confirm, or anything else to cancel.`);
+    return;
+  }
+
+  if (text.toLowerCase() === 'yes delete all flagged') {
     const count = await memoryMigration.confirmDeleteAllFlags();
-    await message.reply(`Done — removed ${count} flagged memor${count === 1 ? 'y' : 'ies'}.`);
+    await message.reply(`Done — removed ${count} flagged memor${count === 1 ? 'y' : 'ies'}. Say "show deleted flags" if you want to see or restore any of them.`);
+    return;
+  }
+
+  if (text.toLowerCase() === 'show deleted flags' || text.toLowerCase() === 'review deleted flags') {
+    const flags = await memoryMigration.getDeletedFlags(10);
+    const totalDeleted = await memoryMigration.getDeletedFlagCount();
+    if (!flags.length) { await message.reply('Nothing in the deleted pile right now.'); return; }
+    const listText = flags.map(f => `**#${f.id}** — ${f.reason}\n> ${f.content.slice(0, 200)}${f.content.length > 200 ? '...' : ''}`).join('\n\n');
+    await sendLongMessage(message.channel, `🗑️ **Deleted flags** (${totalDeleted} total, showing ${flags.length})\n\n${listText}\n\nSay "restore #ID" to bring one back, or "restore all deleted" to bring everything back.`, message);
+    return;
+  }
+
+  const restoreFlagMatch = text.match(/^restore(?: flag)? #?(\d+)$/i);
+  if (restoreFlagMatch) {
+    const result = await memoryMigration.restoreFlag(parseInt(restoreFlagMatch[1], 10));
+    await message.reply(result ? `Restored — back in the pending review queue as a fresh entry.` : `Couldn't find a deleted flag #${restoreFlagMatch[1]}.`);
+    return;
+  }
+
+  if (text.toLowerCase() === 'restore all deleted' || text.toLowerCase() === 'restore all deleted flags') {
+    const count = await memoryMigration.restoreAllDeletedFlags();
+    await message.reply(`Restored ${count} memor${count === 1 ? 'y' : 'ies'} back into the pending review queue.`);
     return;
   }
   if (text.toLowerCase().startsWith('favorite that ')) { await pgPool.query(`UPDATE memories SET is_favorite = true, salience = 1.0 WHERE content ILIKE $1`, [`%${text.slice(14).trim()}%`]); await message.reply('Locked in gold. ⭐'); return; }
