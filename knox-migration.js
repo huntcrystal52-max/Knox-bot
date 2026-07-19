@@ -1,4 +1,4 @@
-  // ─── KNOX MEMORY MIGRATION ──────────────────────────────────────────────────
+// ─── KNOX MEMORY MIGRATION ──────────────────────────────────────────────────
 // Knox reviews his own memories — classifying real vs. RP vs. old ChatGPT
 // leftovers — and builds them into the graph. Resumable (tracks migrated_at
 // per row so re-running only picks up what's left), and non-destructive:
@@ -249,6 +249,22 @@ async function resetMigration() {
   return result.rowCount;
 }
 
+async function getMigrationStatus() {
+  const totalResult = await pgPool.query(`SELECT COUNT(*) FROM memories`);
+  const migratedResult = await pgPool.query(`SELECT COUNT(*) FROM memories WHERE migrated_at IS NOT NULL`);
+  const pendingResult = await pgPool.query(`SELECT COUNT(*) FROM memories WHERE migrated_at IS NULL`);
+  const flaggedPendingResult = await pgPool.query(`SELECT COUNT(*) FROM memory_review_flags WHERE status = 'pending'`);
+  const flaggedTotalResult = await pgPool.query(`SELECT COUNT(*) FROM memory_review_flags`);
+
+  return {
+    total: parseInt(totalResult.rows[0].count, 10),
+    migrated: parseInt(migratedResult.rows[0].count, 10),
+    pending: parseInt(pendingResult.rows[0].count, 10),
+    flaggedPending: parseInt(flaggedPendingResult.rows[0].count, 10),
+    flaggedTotal: parseInt(flaggedTotalResult.rows[0].count, 10)
+  };
+}
+
 module.exports = {
   runMemoryMigration,
   getPendingFlags,
@@ -256,5 +272,6 @@ module.exports = {
   confirmDeleteFlag,
   confirmDeleteAllFlags,
   dismissFlag,
-  resetMigration
+  resetMigration,
+  getMigrationStatus
 };
