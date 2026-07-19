@@ -237,6 +237,47 @@ async function dismissFlag(flagId) {
   await pgPool.query(`UPDATE memory_review_flags SET status = 'dismissed' WHERE id = $1`, [flagId]);
 }
 
+async function getDeletedFlags(limit) {
+  const result = await pgPool.query(
+    `SELECT * FROM memory_review_flags WHERE status = 'deleted' ORDER BY id ASC LIMIT $1`,
+    [limit || 10]
+  );
+  return result.rows;
+}
+
+async function getDeletedFlagCount() {
+  const result = await pgPool.query(`SELECT COUNT(*) FROM memory_review_flags WHERE status = 'deleted'`);
+  return parseInt(result.rows[0].count, 10);
+}
+
+// Restores a single deleted flag's content back into memories as a new row,
+// and puts the flag back in the pending queue so it can be reviewed again.
+async function restoreFlag(flagId) {
+  const flag = await pgPool.query(`SELECT * FROM memory_review_flags WHERE id = $1 AND status = 'deleted'`, [flagId]);
+  if (!flag.rows.length) return null;
+  const f = flag.rows[0];
+  const inserted = await pgPool.query(
+    `INSERT INTO memories (role, content, layer, salience, is_favorite, created_at) VALUES ('unknown', $1, 'surface', 1.0, false, NOW()) RETURNING id`,
+    [f.content]
+  );
+  await pgPool.query(`UPDATE memory_review_flags SET status = 'pending', source_memory_id = $1 WHERE id = $2`, [String(inserted.rows[0].id), flagId]);
+  return { newMemoryId: inserted.rows[0].id, contentPreview: f.content };
+}
+
+async function restoreAllDeletedFlags() {
+  const deleted = await pgPool.query(`SELECT * FROM memory_review_flags WHERE status = 'deleted'`);
+  let restored = 0;
+  for (const f of deleted.rows) {
+    const inserted = await pgPool.query(
+      `INSERT INTO memories (role, content, layer, salience, is_favorite, created_at) VALUES ('unknown', $1, 'surface', 1.0, false, NOW()) RETURNING id`,
+      [f.content]
+    );
+    await pgPool.query(`UPDATE memory_review_flags SET status = 'pending', source_memory_id = $1 WHERE id = $2`, [String(inserted.rows[0].id), f.id]);
+    restored++;
+  }
+  return restored;
+}
+
 async function resetMigration() {
   // Only reset items that failed — leave anything already correctly flagged
   // (which doesn't need an embedding) untouched, so we don't create duplicate flags.
@@ -273,5 +314,9 @@ module.exports = {
   confirmDeleteAllFlags,
   dismissFlag,
   resetMigration,
-  getMigrationStatus
+  getMigrationStatus,
+  getDeletedFlags,
+  getDeletedFlagCount,
+  restoreFlag,
+  restoreAllDeletedFlags
 };
