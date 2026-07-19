@@ -115,7 +115,7 @@ async function createMemoryNode({ id, content, role, createdAt, people, places, 
     await session.run(`
       MERGE (m:Memory {id: $id})
       SET m.content = $content, m.role = $role, m.created_at = $createdAt, m.embedding = $embedding
-    `, { id, content, role: role || 'unknown', createdAt: createdAt || new Date().toISOString(), embedding });
+    `, { id, content, role: role || 'unknown', createdAt: createdAt ? new Date(createdAt).toISOString() : new Date().toISOString(), embedding });
 
     for (const name of (people || [])) {
       await session.run(`
@@ -167,7 +167,7 @@ async function createStoryNode({ id, content, role, createdAt, people, places, e
     await session.run(`
       MERGE (s:Story {id: $id})
       SET s.content = $content, s.role = $role, s.created_at = $createdAt, s.embedding = $embedding
-    `, { id, content, role: role || 'unknown', createdAt: createdAt || new Date().toISOString(), embedding });
+    `, { id, content, role: role || 'unknown', createdAt: createdAt ? new Date(createdAt).toISOString() : new Date().toISOString(), embedding });
 
     for (const name of (people || [])) {
       await session.run(`
