@@ -78,7 +78,7 @@ async function ensureSchema() {
 
 async function generateEmbedding(text) {
   try {
-    const res = await fetch('https://ollama.com/v1/embeddings', {
+    const res = await fetch('https://ollama.com/api/embed', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
       body: JSON.stringify({ model: EMBEDDING_MODEL, input: text })
@@ -89,9 +89,8 @@ async function generateEmbedding(text) {
       return null;
     }
     const data = await res.json();
-    // Handle both OpenAI-style and native Ollama response shapes
-    if (data.data && data.data[0] && data.data[0].embedding) return data.data[0].embedding;
-    if (data.embedding) return data.embedding;
+    // /api/embed returns { embeddings: [[...]] } — an array of vectors, one per input
+    if (data.embeddings && data.embeddings[0]) return data.embeddings[0];
     console.log('[Knox][NEO4J] Embedding response had no recognizable vector.');
     return null;
   } catch (e) {
