@@ -81,6 +81,8 @@ async function processBatch(rows) {
     const cls = classifications.find(c => c.index === i) || classifications[i];
     if (!cls) { counts.failed++; continue; }
 
+    let success = true;
+
     try {
       if (cls.type === 'real') {
         const result = await neo4jMemory.createMemoryNode({
@@ -90,7 +92,7 @@ async function processBatch(rows) {
           createdAt: row.created_at,
           people: cls.people, places: cls.places, emotions: cls.emotions, themes: cls.themes
         });
-        if (result) counts.real++; else counts.failed++;
+        if (result) counts.real++; else { counts.failed++; success = false; }
       } else if (cls.type === 'rp') {
         const result = await neo4jMemory.createStoryNode({
           id: String(row.id),
@@ -99,7 +101,7 @@ async function processBatch(rows) {
           createdAt: row.created_at,
           people: cls.people, places: cls.places, emotions: cls.emotions, themes: cls.themes
         });
-        if (result) counts.rp++; else counts.failed++;
+        if (result) counts.rp++; else { counts.failed++; success = false; }
       } else if (cls.type === 'chatgpt_artifact') {
         await pgPool.query(
           `INSERT INTO memory_review_flags (source_memory_id, content, reason) VALUES ($1, $2, $3)`,
@@ -107,10 +109,12 @@ async function processBatch(rows) {
         );
         counts.flagged++;
       } else {
-        counts.failed++;
+        counts.failed++; success = false;
       }
 
-      await pgPool.query(`UPDATE memories SET migrated_at = NOW() WHERE id = $1`, [row.id]);
+      // Only mark as migrated if it was actually handled — failed items stay
+      // eligible for retry on the next run rather than being silently skipped.
+      if (success) await pgPool.query(`UPDATE memories SET migrated_at = NOW() WHERE id = $1`, [row.id]);
     } catch (e) {
       console.log('[Knox][MIGRATION] Row processing error (id ' + row.id + '):', e.message);
       counts.failed++;
@@ -216,11 +220,24 @@ async function dismissFlag(flagId) {
   await pgPool.query(`UPDATE memory_review_flags SET status = 'dismissed' WHERE id = $1`, [flagId]);
 }
 
+async function resetMigration() {
+  // Only reset items that failed — leave anything already correctly flagged
+  // (which doesn't need an embedding) untouched, so we don't create duplicate flags.
+  const result = await pgPool.query(`
+    UPDATE memories
+    SET migrated_at = NULL
+    WHERE migrated_at IS NOT NULL
+    AND id::text NOT IN (SELECT source_memory_id FROM memory_review_flags)
+  `);
+  return result.rowCount;
+}
+
 module.exports = {
   runMemoryMigration,
   getPendingFlags,
   getPendingFlagCount,
   confirmDeleteFlag,
   confirmDeleteAllFlags,
-  dismissFlag
+  dismissFlag,
+  resetMigration
 };
