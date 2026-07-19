@@ -701,7 +701,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|reset migration|migration status)$/i.test(text.trim())
     || /^delete flag #?\d+$/i.test(text.trim())
     || /^dismiss flag #?\d+$/i.test(text.trim());
   if (moodState.is_sleeping && !isAdminCommand) return;
@@ -763,6 +763,18 @@ discord.on('messageCreate', async function(message) {
   if (text.toLowerCase() === 'reset migration') {
     const count = await memoryMigration.resetMigration();
     await message.reply(`Reset — ${count} memor${count === 1 ? 'y' : 'ies'} marked for reprocessing. Say "start migration" to run it again.`);
+    return;
+  }
+
+  if (text.toLowerCase() === 'migration status') {
+    const status = await memoryMigration.getMigrationStatus();
+    const graphStats = await neo4jMemory.getMemoryStats();
+    await message.reply(
+      `📊 **Migration status**\n\n` +
+      `**Postgres source:** ${status.total} total — ${status.migrated} processed, ${status.pending} still pending\n` +
+      `**Flagged:** ${status.flaggedPending} pending review (${status.flaggedTotal} total ever flagged)\n` +
+      `**In the graph right now:** ${graphStats.memoryCount} real memories, ${graphStats.storyCount} stories`
+    );
     return;
   }
 
