@@ -701,7 +701,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -776,12 +776,26 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
+  if (text.toLowerCase() === 'start archival migration') {
+    await message.reply("On it — this is the big one, ~20,000 to go through, so it'll run for hours in the background. I'll message you when it's done. 🔥");
+    memoryMigration.runArchivalMigration(discord, message.channel.id);
+    return;
+  }
+
+  if (text.toLowerCase() === 'reset archival migration') {
+    const count = await memoryMigration.resetArchivalMigration();
+    await message.reply(`Reset — ${count} archival memor${count === 1 ? 'y' : 'ies'} marked for reprocessing. Say "start archival migration" to run it again.`);
+    return;
+  }
+
   if (text.toLowerCase() === 'migration status') {
     const status = await memoryMigration.getMigrationStatus();
+    const archivalStatus = await memoryMigration.getArchivalMigrationStatus();
     const graphStats = await neo4jMemory.getMemoryStats();
     await message.reply(
       `📊 **Migration status**\n\n` +
-      `**Postgres source:** ${status.total} total — ${status.migrated} processed, ${status.pending} still pending\n` +
+      `**Memories:** ${status.total} total — ${status.migrated} processed, ${status.pending} still pending\n` +
+      `**Archival:** ${archivalStatus.total} total — ${archivalStatus.migrated} processed, ${archivalStatus.pending} still pending\n` +
       `**Flagged:** ${status.flaggedPending} pending review (${status.flaggedTotal} total ever flagged)\n` +
       `**In the graph right now:** ${graphStats.memoryCount} real memories, ${graphStats.storyCount} stories`
     );
