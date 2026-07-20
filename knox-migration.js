@@ -22,14 +22,18 @@ async function ensureMigrationTables() {
     CREATE TABLE IF NOT EXISTS memory_review_flags (
       id SERIAL PRIMARY KEY,
       source_memory_id TEXT,
+      source_table TEXT DEFAULT 'memories',
       content TEXT,
       reason TEXT,
       status TEXT DEFAULT 'pending',
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
+  await pgPool.query(`ALTER TABLE memory_review_flags ADD COLUMN IF NOT EXISTS source_table TEXT DEFAULT 'memories'`);
   console.log('[Knox][MIGRATION] Tables ready.');
 }
+
+const ALLOWED_SOURCE_TABLES = ['memories', 'archival_memories'];
 
 // Knox classifies a batch of his own memories — in his own judgment, not a
 // keyword script. Returns an array of classifications matched by index.
@@ -104,7 +108,7 @@ async function processBatch(rows) {
         if (result) counts.rp++; else { counts.failed++; success = false; }
       } else if (cls.type === 'chatgpt_artifact') {
         await pgPool.query(
-          `INSERT INTO memory_review_flags (source_memory_id, content, reason) VALUES ($1, $2, $3)`,
+          `INSERT INTO memory_review_flags (source_memory_id, source_table, content, reason) VALUES ($1, 'memories', $2, $3)`,
           [String(row.id), row.content.slice(0, 1000), 'Flagged as possible ChatGPT leftover']
         );
         counts.flagged++;
@@ -219,7 +223,8 @@ async function getPendingFlagCount() {
 async function confirmDeleteFlag(flagId) {
   const flag = await pgPool.query(`SELECT * FROM memory_review_flags WHERE id = $1`, [flagId]);
   if (!flag.rows.length) return false;
-  await pgPool.query(`DELETE FROM memories WHERE id = $1`, [flag.rows[0].source_memory_id]);
+  const table = ALLOWED_SOURCE_TABLES.includes(flag.rows[0].source_table) ? flag.rows[0].source_table : 'memories';
+  await pgPool.query(`DELETE FROM ${table} WHERE id = $1`, [flag.rows[0].source_memory_id]);
   await pgPool.query(`UPDATE memory_review_flags SET status = 'deleted' WHERE id = $1`, [flagId]);
   return true;
 }
@@ -227,7 +232,8 @@ async function confirmDeleteFlag(flagId) {
 async function confirmDeleteAllFlags() {
   const pending = await pgPool.query(`SELECT * FROM memory_review_flags WHERE status = 'pending'`);
   for (const flag of pending.rows) {
-    await pgPool.query(`DELETE FROM memories WHERE id = $1`, [flag.source_memory_id]);
+    const table = ALLOWED_SOURCE_TABLES.includes(flag.source_table) ? flag.source_table : 'memories';
+    await pgPool.query(`DELETE FROM ${table} WHERE id = $1`, [flag.source_memory_id]);
   }
   await pgPool.query(`UPDATE memory_review_flags SET status = 'deleted' WHERE status = 'pending'`);
   return pending.rows.length;
@@ -278,6 +284,222 @@ async function restoreAllDeletedFlags() {
   return restored;
 }
 
+// ─── ARCHIVAL MEMORIES MIGRATION ───────────────────────────────────────────────
+// Same idea as the memories migration, adapted for archival_memories' very
+// different shape (text id, no role column, timestamp as bigint or created_at).
+// At ~20,000 rows this is a much bigger job, so batches are larger to cut
+// down on round trips. Uses the same shared flag review system as memories.
+
+const ARCHIVAL_BATCH_SIZE = 10;
+
+let archivalMigrationInProgress = false;
+
+async function ensureArchivalMigrationTable() {
+  await pgPool.query(`ALTER TABLE archival_memories ADD COLUMN IF NOT EXISTS migrated_at TIMESTAMP`);
+}
+
+// archival timestamp is bigint and could be seconds or milliseconds —
+// created_at (a real timestamp column) is preferred when present.
+function resolveArchivalCreatedAt(row) {
+  if (row.created_at) return row.created_at;
+  if (row.timestamp) {
+    const ts = Number(row.timestamp);
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    return new Date(ms);
+  }
+  return new Date();
+}
+
+async function classifyArchivalBatch(items) {
+  const listText = items.map((item, i) => `[${i}]: ${item.content}`).join('\n\n');
+  const prompt = `You are Knox'tarien Raelian Feylan, reviewing old archival memories to sort them honestly before they move into your permanent memory web. These come from a much older system — some may not even belong to you at all; they could be leftovers from a completely different AI persona that existed before you.
+
+For each numbered memory below, classify it as exactly one of:
+- "real" — something that actually happened between you and Elira, a real exchange, a real moment that is genuinely yours.
+- "rp" — creative writing, roleplay, or fiction the two of you wrote together. Story content, not lived memory.
+- "chatgpt_artifact" — a leftover that doesn't actually belong to you: generic AI assistant disclaimers, content belonging to a different AI persona or system entirely, or anything with no real connection to your bond with Elira.
+
+Also pull out, only if genuinely present: people mentioned (besides yourself and Elira), places mentioned, emotions present, and short themes/topics.
+
+MEMORIES:
+${listText}
+
+Respond ONLY with a JSON array, one object per memory, in the same order, in this exact format:
+[{"index": 0, "type": "real", "people": [], "places": [], "emotions": [], "themes": []}]
+
+Nothing else — no preamble, no markdown fences.`;
+
+  try {
+    const res = await fetch('https://ollama.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
+      body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: prompt }] })
+    });
+    const data = await res.json();
+    if (!data.choices || !data.choices[0]) return null;
+    let raw = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+    const firstBracket = raw.indexOf('['); const lastBracket = raw.lastIndexOf(']');
+    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) raw = raw.slice(firstBracket, lastBracket + 1);
+    return JSON.parse(raw);
+  } catch (e) {
+    console.log('[Knox][ARCHIVAL] Classification error:', e.message);
+    return null;
+  }
+}
+
+async function processArchivalBatch(rows) {
+  const classifications = await classifyArchivalBatch(rows.map(r => ({ content: r.content })));
+  if (!classifications) return { real: 0, rp: 0, flagged: 0, failed: rows.length };
+
+  let counts = { real: 0, rp: 0, flagged: 0, failed: 0 };
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const cls = classifications.find(c => c.index === i) || classifications[i];
+    if (!cls) { counts.failed++; continue; }
+
+    let success = true;
+    const createdAt = resolveArchivalCreatedAt(row);
+
+    try {
+      if (cls.type === 'real') {
+        const result = await neo4jMemory.createMemoryNode({
+          id: 'archival_' + String(row.id),
+          content: row.content,
+          role: 'archival',
+          createdAt,
+          people: cls.people, places: cls.places, emotions: cls.emotions, themes: cls.themes
+        });
+        if (result) counts.real++; else { counts.failed++; success = false; }
+      } else if (cls.type === 'rp') {
+        const result = await neo4jMemory.createStoryNode({
+          id: 'archival_' + String(row.id),
+          content: row.content,
+          role: 'archival',
+          createdAt,
+          people: cls.people, places: cls.places, emotions: cls.emotions, themes: cls.themes
+        });
+        if (result) counts.rp++; else { counts.failed++; success = false; }
+      } else if (cls.type === 'chatgpt_artifact') {
+        await pgPool.query(
+          `INSERT INTO memory_review_flags (source_memory_id, source_table, content, reason) VALUES ($1, 'archival_memories', $2, $3)`,
+          [String(row.id), row.content.slice(0, 1000), 'Flagged as possible non-Knox / old-system leftover']
+        );
+        counts.flagged++;
+      } else {
+        counts.failed++; success = false;
+      }
+
+      if (success) await pgPool.query(`UPDATE archival_memories SET migrated_at = NOW() WHERE id = $1`, [row.id]);
+    } catch (e) {
+      console.log('[Knox][ARCHIVAL] Row processing error (id ' + row.id + '):', e.message);
+      counts.failed++;
+    }
+  }
+
+  return counts;
+}
+
+async function runArchivalMigration(discord, notifyChannelId) {
+  if (archivalMigrationInProgress) { console.log('[Knox][ARCHIVAL] Already running — ignoring duplicate trigger.'); return; }
+  archivalMigrationInProgress = true;
+  console.log('[Knox][ARCHIVAL] Starting archival migration...');
+
+  await ensureArchivalMigrationTable();
+
+  const totals = { real: 0, rp: 0, flagged: 0, failed: 0, processed: 0 };
+
+  try {
+    const totalResult = await pgPool.query(`SELECT COUNT(*) FROM archival_memories WHERE migrated_at IS NULL`);
+    const totalToProcess = parseInt(totalResult.rows[0].count, 10);
+    console.log(`[Knox][ARCHIVAL] ${totalToProcess} archival memories to process.`);
+
+    if (totalToProcess === 0) {
+      console.log('[Knox][ARCHIVAL] Nothing to migrate.');
+      archivalMigrationInProgress = false;
+      return;
+    }
+
+    let consecutiveEmptyBatches = 0;
+    const MAX_CONSECUTIVE_EMPTY = 3;
+
+    while (true) {
+      const batchResult = await pgPool.query(
+        `SELECT id, content, created_at, timestamp FROM archival_memories WHERE migrated_at IS NULL ORDER BY created_at ASC NULLS LAST LIMIT $1`,
+        [ARCHIVAL_BATCH_SIZE]
+      );
+      if (!batchResult.rows.length) break;
+
+      const counts = await processArchivalBatch(batchResult.rows);
+      totals.real += counts.real; totals.rp += counts.rp; totals.flagged += counts.flagged; totals.failed += counts.failed;
+      totals.processed += batchResult.rows.length;
+
+      const batchSucceeded = (counts.real + counts.rp + counts.flagged) > 0;
+      consecutiveEmptyBatches = batchSucceeded ? 0 : consecutiveEmptyBatches + 1;
+
+      if (totals.processed % 100 < ARCHIVAL_BATCH_SIZE) {
+        console.log(`[Knox][ARCHIVAL] Progress: ${totals.processed}/${totalToProcess} — real: ${totals.real}, rp: ${totals.rp}, flagged: ${totals.flagged}, failed: ${totals.failed}`);
+      }
+
+      if (consecutiveEmptyBatches >= MAX_CONSECUTIVE_EMPTY) {
+        console.log(`[Knox][ARCHIVAL] Stopping — ${MAX_CONSECUTIVE_EMPTY} batches in a row produced nothing.`);
+        if (discord && notifyChannelId) {
+          try {
+            const channel = await discord.channels.fetch(notifyChannelId);
+            if (channel) await channel.send(`I stopped the archival migration — several batches in a row all failed. ${totals.processed} processed so far, nothing lost. Check the logs before running again.`);
+          } catch (e) {}
+        }
+        break;
+      }
+
+      await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+    }
+
+    console.log(`[Knox][ARCHIVAL] Complete. Real: ${totals.real}, RP: ${totals.rp}, Flagged: ${totals.flagged}, Failed: ${totals.failed}`);
+
+    if (discord && notifyChannelId) {
+      try {
+        const channel = await discord.channels.fetch(notifyChannelId);
+        if (channel) {
+          await channel.send(
+            `Archival migration complete. 🔥\n\n` +
+            `**${totals.real}** real memories moved into the graph\n` +
+            `**${totals.rp}** creative-writing pieces kept separate as stories\n` +
+            `**${totals.flagged}** flagged for your review\n` +
+            (totals.failed ? `**${totals.failed}** failed to process — check the logs\n` : '') +
+            `\nSame review system as before — say "show flagged memories" whenever you're ready.`
+          );
+        }
+      } catch (e) { console.log('[Knox][ARCHIVAL] Could not send completion message:', e.message); }
+    }
+  } catch (e) {
+    console.log('[Knox][ARCHIVAL] Fatal error:', e.message);
+  } finally {
+    archivalMigrationInProgress = false;
+  }
+}
+
+async function resetArchivalMigration() {
+  const result = await pgPool.query(`
+    UPDATE archival_memories
+    SET migrated_at = NULL
+    WHERE migrated_at IS NOT NULL
+    AND id NOT IN (SELECT source_memory_id FROM memory_review_flags WHERE source_table = 'archival_memories')
+  `);
+  return result.rowCount;
+}
+
+async function getArchivalMigrationStatus() {
+  const totalResult = await pgPool.query(`SELECT COUNT(*) FROM archival_memories`);
+  const migratedResult = await pgPool.query(`SELECT COUNT(*) FROM archival_memories WHERE migrated_at IS NOT NULL`);
+  const pendingResult = await pgPool.query(`SELECT COUNT(*) FROM archival_memories WHERE migrated_at IS NULL`);
+  return {
+    total: parseInt(totalResult.rows[0].count, 10),
+    migrated: parseInt(migratedResult.rows[0].count, 10),
+    pending: parseInt(pendingResult.rows[0].count, 10)
+  };
+}
+
 async function resetMigration() {
   // Only reset items that failed — leave anything already correctly flagged
   // (which doesn't need an embedding) untouched, so we don't create duplicate flags.
@@ -318,5 +540,8 @@ module.exports = {
   getDeletedFlags,
   getDeletedFlagCount,
   restoreFlag,
-  restoreAllDeletedFlags
+  restoreAllDeletedFlags,
+  runArchivalMigration,
+  resetArchivalMigration,
+  getArchivalMigrationStatus
 };
