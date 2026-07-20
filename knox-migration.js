@@ -295,6 +295,7 @@ const ARCHIVAL_BATCH_SIZE = 10;
 let archivalMigrationInProgress = false;
 
 async function ensureArchivalMigrationTable() {
+  await ensureMigrationTables();
   await pgPool.query(`ALTER TABLE archival_memories ADD COLUMN IF NOT EXISTS migrated_at TIMESTAMP`);
 }
 
