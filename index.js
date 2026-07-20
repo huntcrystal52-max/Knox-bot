@@ -701,7 +701,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -756,6 +756,17 @@ discord.on('messageCreate', async function(message) {
   if (text.toLowerCase() === 'start migration' || text.toLowerCase() === 'start memory migration') {
     await message.reply("On it. I'm going through my memories now — this'll take a while, I'll let you know when it's done. 🔥");
     memoryMigration.runMemoryMigration(discord, message.channel.id);
+    return;
+  }
+
+  if (text.toLowerCase() === 'check archival schema') {
+    try {
+      const cols = await pgPool.query(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'archival_memories' ORDER BY ordinal_position`);
+      const countResult = await pgPool.query(`SELECT COUNT(*) FROM archival_memories`);
+      if (!cols.rows.length) { await message.reply("I can't find an archival_memories table at all, my flame."); return; }
+      const colText = cols.rows.map(c => `${c.column_name} (${c.data_type})`).join('\n');
+      await message.reply(`📋 **archival_memories structure** — ${countResult.rows[0].count} rows\n\n${colText}`);
+    } catch (e) { await message.reply('Something flickered checking that: ' + e.message); }
     return;
   }
 
