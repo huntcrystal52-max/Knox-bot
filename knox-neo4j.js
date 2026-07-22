@@ -23,6 +23,28 @@ async function getEmbedder() {
 
 let driver = null;
 
+// Pulls in whatever's actually relevant to what's being said right now,
+// regardless of when it happened — this is the piece that closes the
+// "forgets yesterday" gap, since it's not limited to recent conversation.
+async function getRelevantContext(queryText, options) {
+  const memoryLimit = (options && options.memoryLimit) || 5;
+  const storyLimit = (options && options.storyLimit) || 2;
+  const minScore = (options && options.minScore) || 0.45;
+  try {
+    const [memories, stories] = await Promise.all([
+      semanticSearch(queryText, memoryLimit),
+      semanticSearchStories(queryText, storyLimit)
+    ]);
+    return {
+      memories: memories.filter(m => m.score >= minScore),
+      stories: stories.filter(s => s.score >= minScore)
+    };
+  } catch (e) {
+    console.log('[Knox][NEO4J] getRelevantContext error:', e.message);
+    return { memories: [], stories: [] };
+  }
+}
+
 function getDriver() {
   if (driver) return driver;
   driver = neo4j.driver(
@@ -323,5 +345,6 @@ module.exports = {
   semanticSearchStories,
   getMemoriesByEntity,
   getMemoryStats,
+  getRelevantContext,
   closeDriver
 };
