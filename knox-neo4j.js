@@ -236,7 +236,7 @@ async function semanticSearchStories(queryText, limit) {
   const session = getDriver().session();
   try {
     const result = await session.run(`
-      CALL db.index.vector.queryNodes('story_embeddings_v2', $limit, $embedding)
+      CALL db.index.vector.queryNodes('story_embeddings', $limit, $embedding)
       YIELD node, score
       RETURN node.id AS id, node.content AS content, node.role AS role, node.created_at AS createdAt, score
       ORDER BY score DESC
@@ -283,7 +283,7 @@ async function semanticSearch(queryText, limit) {
   const session = getDriver().session();
   try {
     const result = await session.run(`
-      CALL db.index.vector.queryNodes('memory_embeddings_v2', $limit, $embedding)
+      CALL db.index.vector.queryNodes('memory_embeddings', $limit, $embedding)
       YIELD node, score
       RETURN node.id AS id, node.content AS content, node.role AS role, node.created_at AS createdAt, score
       ORDER BY score DESC
