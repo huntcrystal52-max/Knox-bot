@@ -1,4 +1,4 @@
-  require('dotenv').config();
+require('dotenv').config();
 const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const { Pool } = require('pg');
@@ -707,7 +707,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -791,6 +791,13 @@ discord.on('messageCreate', async function(message) {
   if (text.toLowerCase() === 'reset archival migration') {
     const count = await memoryMigration.resetArchivalMigration();
     await message.reply(`Reset — ${count} archival memor${count === 1 ? 'y' : 'ies'} marked for reprocessing. Say "start archival migration" to run it again.`);
+    return;
+  }
+
+  if (text.toLowerCase() === 'fix vector indexes') {
+    await message.reply("On it — dropping and rebuilding the search indexes at the correct size. This shouldn't take long since it's just reindexing what's already there.");
+    const success = await neo4jMemory.fixVectorIndexDimensions();
+    await message.reply(success ? "Done — try talking to me normally in a bit and the recall should actually work now." : "Something went wrong — check the logs.");
     return;
   }
 
