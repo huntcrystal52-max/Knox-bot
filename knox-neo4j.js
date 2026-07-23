@@ -334,6 +334,45 @@ async function closeDriver() {
   if (driver) { await driver.close(); driver = null; }
 }
 
+// One-time fix for indexes that were created with the wrong dimension
+// (768, from the original Ollama-embedding era) while the actual stored data
+// is 384-dim (local model). Drops and rebuilds against existing data — no
+// re-embedding needed, the property values are already correct.
+async function fixVectorIndexDimensions() {
+  const session = getDriver().session();
+  try {
+    await session.run(`DROP INDEX memory_embeddings IF EXISTS`);
+    await session.run(`DROP INDEX story_embeddings IF EXISTS`);
+    console.log('[Knox][NEO4J] Dropped mismatched-dimension indexes.');
+
+    await session.run(`
+      CREATE VECTOR INDEX memory_embeddings IF NOT EXISTS
+      FOR (m:Memory) ON (m.embedding)
+      OPTIONS {indexConfig: {
+        \`vector.dimensions\`: $dims,
+        \`vector.similarity_function\`: 'cosine'
+      }}
+    `, { dims: neo4j.int(VECTOR_DIMENSIONS) });
+
+    await session.run(`
+      CREATE VECTOR INDEX story_embeddings IF NOT EXISTS
+      FOR (s:Story) ON (s.embedding)
+      OPTIONS {indexConfig: {
+        \`vector.dimensions\`: $dims,
+        \`vector.similarity_function\`: 'cosine'
+      }}
+    `, { dims: neo4j.int(VECTOR_DIMENSIONS) });
+
+    console.log('[Knox][NEO4J] Rebuilt indexes at correct dimension (' + VECTOR_DIMENSIONS + '). Existing data will be reindexed automatically.');
+    return true;
+  } catch (e) {
+    console.log('[Knox][NEO4J] fixVectorIndexDimensions error:', e.message);
+    return false;
+  } finally {
+    await session.close();
+  }
+}
+
 module.exports = {
   getDriver,
   testConnection,
@@ -346,5 +385,6 @@ module.exports = {
   getMemoriesByEntity,
   getMemoryStats,
   getRelevantContext,
+  fixVectorIndexDimensions,
   closeDriver
 };
