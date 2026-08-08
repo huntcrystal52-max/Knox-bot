@@ -90,7 +90,7 @@ async function buildSceneDescription() {
 
 async function generateGardenImage(sceneDescription) {
   try {
-    const prompt = `A tranquil, painterly garden scene — soft natural light, atmospheric, alive with quiet detail. The garden currently contains:\n\n${sceneDescription}\n\nRender this as one cohesive, beautiful scene — everything listed should be visible and in harmony together.`;
+    const prompt = `A wide plot of open land, painterly style, soft natural light, atmospheric. This is what physically exists here right now, and NOTHING ELSE:\n\n${sceneDescription}\n\nCritical: render ONLY what is explicitly listed above. If trees, flowers, bushes, or other plants are not named in the list, the land around them must be shown as bare open ground or ground with sparse simple grass — empty, not lush, not landscaped, no additional vegetation invented. Do not add decorative plants, flower beds, or trees that aren't specifically described. The scene should look exactly as sparse or as full as the list above indicates — nothing more.`;
     const res = await fetch('https://fal.run/fal-ai/flux/schnell', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
