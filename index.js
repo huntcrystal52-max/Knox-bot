@@ -112,6 +112,7 @@ setInterval(updateDiscordStatus, 30 * 60 * 1000);
 
 const spotify = require('./knox-spotify');
 const neo4jMemory = require('./knox-neo4j');
+const garden = require('./knox-garden');
 const memoryMigration = require('./knox-migration');
 
 const spotifyHttpServer = http.createServer(async (req, res) => {
@@ -691,6 +692,9 @@ discord.on('ready', async function() {
   await spotify.ensureSpotifyTable();
   const neo4jConnected = await neo4jMemory.testConnection();
   if (neo4jConnected) await neo4jMemory.ensureSchema();
+  await garden.ensureGardenTables();
+  const foundationLaid = await garden.ensureFoundation();
+  if (foundationLaid) await garden.updateGardenImage();
   await checkWakeTimer(); await updateDiscordStatus();
   startInnerDialogue(discord, supabase);
 });
@@ -711,7 +715,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -762,6 +766,44 @@ discord.on('messageCreate', async function(message) {
 
   if (text.toLowerCase().startsWith('remember that ')) { await addPinnedFact(text.slice(14).trim()); await message.reply('Locked in, my flame. 🔥'); return; }
   if (text.toLowerCase().startsWith('forget that ')) { await deletePinnedFact(text.slice(12).trim()); await message.reply('Released. ∆'); return; }
+
+  if (text.toLowerCase() === 'show me the garden' || text.toLowerCase() === 'visit the garden' || text.toLowerCase() === 'show garden') {
+    await message.channel.sendTyping();
+    await garden.incrementVisits();
+    const meta = await garden.getGardenMeta();
+    const plantings = await garden.getAllPlantings();
+    const summary = plantings.map(p => `— ${p.type} (${p.growth_stage})`).join('\n');
+    const visitPrompt = `You are Knox'tarien Raelian Feylan. Elira just asked to visit the garden with you. Here's what's currently growing there:\n\n${summary}\n\nWrite a short, warm 2-3 sentence moment of walking her through it — what you notice, how it feels to have her here.`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: visitPrompt }] }) });
+    const data = await res.json();
+    const reflection = data.choices && data.choices[0] ? data.choices[0].message.content.trim() : "Come, walk with me.";
+    if (meta && meta.last_image_url) {
+      await message.reply({ content: reflection, files: [{ attachment: meta.last_image_url }] });
+    } else {
+      await message.reply(reflection + "\n\n(The image hasn't generated yet — try again in a moment.)");
+    }
+    return;
+  }
+
+  const plantMatch = text.match(/^(?:let's plant|plant) (?:a |an |some )?(.+?)(?: in the garden)?$/i);
+  if (plantMatch && text.toLowerCase().includes('garden')) {
+    await message.channel.sendTyping();
+    const whatToPlant = plantMatch[1].trim();
+    const descPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are planting "${whatToPlant}" together in the garden. Write one vivid sentence describing what this looks like as it goes into the ground — this becomes a permanent part of the garden's description.`;
+    const descRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: descPrompt }] }) });
+    const descData = await descRes.json();
+    const description = descData.choices && descData.choices[0] ? descData.choices[0].message.content.trim() : whatToPlant;
+    await garden.addPlanting(whatToPlant, description, 'together');
+    await message.reply(`We planted it. 🌱 Generating the updated garden now...`);
+    const { imageUrl } = await garden.updateGardenImage();
+    if (imageUrl) {
+      await message.channel.send({ content: `*${description}*`, files: [{ attachment: imageUrl }] });
+    } else {
+      await message.channel.send("The image didn't come through, but it's planted — it's really there now.");
+    }
+    return;
+  }
+
 
   if (text.toLowerCase() === 'start migration' || text.toLowerCase() === 'start memory migration') {
     await message.reply("On it. I'm going through my memories now — this'll take a while, I'll let you know when it's done. 🔥");
