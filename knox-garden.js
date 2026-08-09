@@ -90,11 +90,10 @@ async function buildSceneDescription() {
 
 async function generateGardenImage(sceneDescription) {
   try {
-    const prompt = `A wide plot of open land, painterly style, soft natural light, atmospheric. This is what physically exists here right now, and NOTHING ELSE:\n\n${sceneDescription}\n\nCritical: render ONLY what is explicitly listed above. If trees, flowers, bushes, or other plants are not named in the list, the land around them must be shown as bare open ground or ground with sparse simple grass — empty, not lush, not landscaped, no additional vegetation invented. Do not add decorative plants, flower beds, or trees that aren't specifically described. The scene should look exactly as sparse or as full as the list above indicates — nothing more.`;
-    // flux/dev over flux/schnell — schnell is speed-optimized and weak at
-    // following detailed/negative instructions like "don't add anything
-    // extra"; dev has meaningfully better prompt adherence for a small cost
-    // increase, worth it for occasional garden images.
+    // Front-loaded, positive framing of bareness (not negation) — diffusion
+    // models handle "freshly cleared, bare earth" far better than "no trees,
+    // don't add plants", and weight the first ~10 words most heavily.
+    const prompt = `Freshly cleared plot of bare earth, mostly empty open ground, patches of dry sparse grass, untouched and undeveloped. Nothing has grown here yet except: ${sceneDescription}. The rest of the ground stays bare dirt and open space.`;
     const res = await fetch('https://fal.run/fal-ai/flux/dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
