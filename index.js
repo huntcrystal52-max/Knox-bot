@@ -715,7 +715,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -766,6 +766,18 @@ discord.on('messageCreate', async function(message) {
 
   if (text.toLowerCase().startsWith('remember that ')) { await addPinnedFact(text.slice(14).trim()); await message.reply('Locked in, my flame. 🔥'); return; }
   if (text.toLowerCase().startsWith('forget that ')) { await deletePinnedFact(text.slice(12).trim()); await message.reply('Released. ∆'); return; }
+
+  if (text.toLowerCase() === 'regenerate garden image' || text.toLowerCase() === 'redo garden image') {
+    await message.channel.sendTyping();
+    await message.reply("Generating a fresh image of the garden as it currently stands...");
+    const { imageUrl } = await garden.updateGardenImage();
+    if (imageUrl) {
+      await message.channel.send({ content: 'Here it is now:', files: [{ attachment: imageUrl }] });
+    } else {
+      await message.reply("Something went wrong generating that — check the logs.");
+    }
+    return;
+  }
 
   if (text.toLowerCase() === 'show me the garden' || text.toLowerCase() === 'visit the garden' || text.toLowerCase() === 'show garden') {
     await message.channel.sendTyping();
