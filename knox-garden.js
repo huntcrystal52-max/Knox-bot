@@ -93,10 +93,12 @@ async function buildSceneDescription() {
 
 async function generateGardenImage(sceneDescription) {
   try {
-    // Pushed further after the previous attempt only partially worked —
-    // "lake" alone still pulled strong lush-forest associations, so this
-    // leans into stark, dry, undeveloped-lot framing to counteract it.
-    const prompt = `A flat, mostly empty dirt lot, dry cracked earth and dust, like an undeveloped construction site before anything is built — bare and open under the sky. The only thing here: ${sceneDescription}. The entire rest of the ground is empty dirt and dust — no grass, no trees, no bushes, nothing green.`;
+    // Three photorealistic attempts all defaulted to lush forest regardless
+    // of wording — "lake" photography is just too strongly tied to dense
+    // greenery in training data. Switching genre entirely: an unfinished
+    // watercolor sketch, where blank space is the normal, expected state
+    // rather than something fighting the model's instincts.
+    const prompt = `A soft watercolor illustration, garden planning sketch, loose gentle brushstrokes on cream paper, viewed from a slight angle above. This is an early, unfinished sketch — the artist has only painted in a few things so far: ${sceneDescription}. The rest of the paper is intentionally left blank and untouched, as an unfinished sketch would be — open cream paper, no additional painted details, nothing else filled in yet.`;
     const res = await fetch('https://fal.run/fal-ai/flux/dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
