@@ -85,15 +85,18 @@ function stagePhrase(stage) {
 async function buildSceneDescription() {
   const plantings = await getAllPlantings();
   if (!plantings.length) return 'An empty stretch of bare ground, waiting for the first thing to be planted.';
-  return plantings.map(p => `A ${p.type} (${stagePhrase(p.growth_stage)}): ${p.description}`).join('\n');
+  return plantings.map(p => {
+    if (p.type === 'lake' || p.planted_by === 'foundation') return `The lake: ${p.description}`;
+    return `A ${p.type} (${stagePhrase(p.growth_stage)}): ${p.description}`;
+  }).join('\n');
 }
 
 async function generateGardenImage(sceneDescription) {
   try {
-    // Front-loaded, positive framing of bareness (not negation) — diffusion
-    // models handle "freshly cleared, bare earth" far better than "no trees,
-    // don't add plants", and weight the first ~10 words most heavily.
-    const prompt = `Freshly cleared plot of bare earth, mostly empty open ground, patches of dry sparse grass, untouched and undeveloped. Nothing has grown here yet except: ${sceneDescription}. The rest of the ground stays bare dirt and open space.`;
+    // Pushed further after the previous attempt only partially worked —
+    // "lake" alone still pulled strong lush-forest associations, so this
+    // leans into stark, dry, undeveloped-lot framing to counteract it.
+    const prompt = `A flat, mostly empty dirt lot, dry cracked earth and dust, like an undeveloped construction site before anything is built — bare and open under the sky. The only thing here: ${sceneDescription}. The entire rest of the ground is empty dirt and dust — no grass, no trees, no bushes, nothing green.`;
     const res = await fetch('https://fal.run/fal-ai/flux/dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
