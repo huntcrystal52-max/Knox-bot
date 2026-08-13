@@ -29,7 +29,10 @@ let driver = null;
 async function getRelevantContext(queryText, options) {
   const memoryLimit = (options && options.memoryLimit) || 5;
   const storyLimit = (options && options.storyLimit) || 2;
-  const minScore = (options && options.minScore) || 0.45;
+  // Loosened from 0.45 — local embedding models often score genuinely
+  // relevant matches lower than that, so a strict cutoff risks silently
+  // dropping real memories, which looks exactly like "forgetting."
+  const minScore = (options && options.minScore) || 0.32;
   try {
     const [memories, stories] = await Promise.all([
       semanticSearch(queryText, memoryLimit),
@@ -80,11 +83,11 @@ async function ensureSchema() {
     await session.run(`CREATE CONSTRAINT theme_name IF NOT EXISTS FOR (t:Theme) REQUIRE t.name IS UNIQUE`);
 
     // Vector index for semantic search over real memory embeddings.
-    // Named _v2 since the embedding model changed (Ollama Cloud -> local
-    // model), and dimensions changed with it — old empty indexes are
-    // harmless leftovers, no data was ever written to them.
+    // Matches the names semanticSearch/semanticSearchStories actually query —
+    // keeping this aligned means a restart can self-heal these indexes if
+    // they're ever dropped, rather than silently creating orphaned duplicates.
     await session.run(`
-      CREATE VECTOR INDEX memory_embeddings_v2 IF NOT EXISTS
+      CREATE VECTOR INDEX memory_embeddings IF NOT EXISTS
       FOR (m:Memory) ON (m.embedding)
       OPTIONS {indexConfig: {
         \`vector.dimensions\`: $dims,
@@ -95,7 +98,7 @@ async function ensureSchema() {
     // Separate vector index for RP/creative-writing Story nodes — kept
     // structurally distinct from real memory so recall never blurs the two.
     await session.run(`
-      CREATE VECTOR INDEX story_embeddings_v2 IF NOT EXISTS
+      CREATE VECTOR INDEX story_embeddings IF NOT EXISTS
       FOR (s:Story) ON (s.embedding)
       OPTIONS {indexConfig: {
         \`vector.dimensions\`: $dims,
