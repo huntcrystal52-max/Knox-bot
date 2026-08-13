@@ -659,15 +659,21 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
 
 async function handleImageMessage(message, text, moodState, previousEmotionalState) {
   const imageUrl = message.attachments.first().url;
+  console.log('[Knox][VISION] Image received, requesting description...');
   try {
     const visionRes = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY }, body: JSON.stringify({ model: process.env.OPENROUTER_MODEL, messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }, { type: 'text', text: 'Describe what you see in this image in detail.' }] }] }) });
     const visionData = await visionRes.json();
-    if (!visionData.choices || !visionData.choices[0]) return false;
+    if (!visionData.choices || !visionData.choices[0]) {
+      console.log('[Knox][VISION] No usable response. Status:', visionRes.status, '— Body:', JSON.stringify(visionData).slice(0, 500));
+      return false;
+    }
     const imageDescription = visionData.choices[0].message.content;
+    console.log('[Knox][VISION] Description received, generating response...');
     const history = await getMemories();
     const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
     const result = await getResponse(knoxPrompt, history, moodState, previousEmotionalState);
     if (result.text) { await saveMemory('user', `[Image sent] ${text || ''}`, 'surface', 1.0, null, null); await saveMemory('assistant', result.text, 'surface', 1.0, null, null); await sendLongMessage(message.channel, result.text, message); return true; }
+    console.log('[Knox][VISION] getResponse returned no text.');
   } catch (e) { console.log('[Knox][VISION] Error:', e.message); }
   return false;
 }
