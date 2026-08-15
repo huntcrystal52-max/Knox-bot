@@ -13,6 +13,13 @@ const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: fa
 
 const GROWTH_STAGES = ['seedling', 'growing', 'flourishing'];
 
+// A real photo (Pexels, free to use) — aerial shot of a pond surrounded by
+// grass and farmland, no forest. Used as the actual starting point instead
+// of AI generation, after four straight attempts all defaulted to lush
+// forest regardless of technique. Everything planted after this point is
+// edited onto this real base using image-to-image, not reimagined from text.
+const FOUNDATION_IMAGE_URL = 'https://images.pexels.com/photos/27985283/pexels-photo-27985283.jpeg?auto=compress&cs=tinysrgb&w=1600';
+
 async function ensureGardenTables() {
   await pgPool.query(`
     CREATE TABLE IF NOT EXISTS garden_plantings (
@@ -43,7 +50,13 @@ async function ensureFoundation() {
     `INSERT INTO garden_plantings (type, description, planted_by, growth_stage) VALUES ($1, $2, $3, $4)`,
     ['lake', 'A still, clear lake at the heart of the garden — the one thing that was always there, before anything was planted.', 'foundation', 'flourishing']
   );
-  console.log('[Knox][GARDEN] Foundation laid — the lake is in place.');
+  // Foundation image is a real photo, not AI-generated — see FOUNDATION_IMAGE_URL note above.
+  await pgPool.query(
+    `INSERT INTO garden_meta (id, last_image_url, last_updated) VALUES (1, $1, NOW())
+     ON CONFLICT (id) DO UPDATE SET last_image_url = $1, last_updated = NOW()`,
+    [FOUNDATION_IMAGE_URL]
+  );
+  console.log('[Knox][GARDEN] Foundation laid — the lake is in place (real photo, not generated).');
   return true;
 }
 
@@ -91,29 +104,38 @@ async function buildSceneDescription() {
   }).join('\n');
 }
 
-async function generateGardenImage(sceneDescription) {
+// Edits the CURRENT garden image with one targeted change, rather than
+// reimagining the whole scene from a text description — this is what
+// FLUX Kontext is actually built for ("add this while keeping everything
+// else the same"), and it's the fix for four straight text-to-image
+// attempts all defaulting to lush regardless of wording.
+async function editGardenImage(editInstruction) {
   try {
-    // Three photorealistic attempts all defaulted to lush forest regardless
-    // of wording — "lake" photography is just too strongly tied to dense
-    // greenery in training data. Switching genre entirely: an unfinished
-    // watercolor sketch, where blank space is the normal, expected state
-    // rather than something fighting the model's instincts.
-    const prompt = `A soft watercolor illustration, garden planning sketch, loose gentle brushstrokes on cream paper, viewed from a slight angle above. This is an early, unfinished sketch — the artist has only painted in a few things so far: ${sceneDescription}. The rest of the paper is intentionally left blank and untouched, as an unfinished sketch would be — open cream paper, no additional painted details, nothing else filled in yet.`;
-    const res = await fetch('https://fal.run/fal-ai/flux/dev', {
+    const meta = await getGardenMeta();
+    const currentImageUrl = (meta && meta.last_image_url) || FOUNDATION_IMAGE_URL;
+    const prompt = `${editInstruction} Keep everything else in the image exactly as it is — same composition, same lighting, same everything else. Only make this one change.`;
+    const res = await fetch('https://fal.run/fal-ai/flux-kontext/dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Key ' + process.env.FAL_API_KEY },
-      body: JSON.stringify({ prompt, image_size: 'landscape_16_9', num_images: 1, num_inference_steps: 28 })
+      body: JSON.stringify({ prompt, image_url: currentImageUrl })
     });
     const data = await res.json();
     if (data.images && data.images[0]) return data.images[0].url;
-    console.log('[Knox][GARDEN] No image in response.');
+    console.log('[Knox][GARDEN] Kontext edit — no image in response:', JSON.stringify(data).slice(0, 300));
     return null;
-  } catch (e) { console.log('[Knox][GARDEN] Image generation error:', e.message); return null; }
+  } catch (e) { console.log('[Knox][GARDEN] Image edit error:', e.message); return null; }
 }
 
-async function updateGardenImage() {
-  const sceneDescription = await buildSceneDescription();
-  const imageUrl = await generateGardenImage(sceneDescription);
+// editInstruction: what's changing right now (e.g. "Add a small newly-
+// planted willow sapling near the water's edge, tender and small"). If
+// omitted, just returns the current image without generating anything new —
+// there's nothing to show that isn't already shown.
+async function updateGardenImage(editInstruction) {
+  if (!editInstruction) {
+    const meta = await getGardenMeta();
+    return { imageUrl: meta ? meta.last_image_url : null, sceneDescription: await buildSceneDescription() };
+  }
+  const imageUrl = await editGardenImage(editInstruction);
   if (imageUrl) {
     await pgPool.query(
       `INSERT INTO garden_meta (id, last_image_url, last_updated) VALUES (1, $1, NOW())
@@ -121,7 +143,16 @@ async function updateGardenImage() {
       [imageUrl]
     );
   }
-  return { imageUrl, sceneDescription };
+  return { imageUrl, sceneDescription: await buildSceneDescription() };
+}
+
+// Builds a natural edit instruction for a growth-stage change, used when
+// tending an existing planting rather than adding something new.
+function buildTendEditInstruction(planting) {
+  const stageAction = planting.growth_stage === 'growing'
+    ? `taking root and growing fuller than before`
+    : `now fully grown and flourishing`;
+  return `The ${planting.type} in this image has grown — make it visibly ${stageAction}, larger and more developed than its current state.`;
 }
 
 async function getGardenMeta() {
@@ -143,8 +174,9 @@ module.exports = {
   addPlanting,
   tendRandomPlanting,
   buildSceneDescription,
-  generateGardenImage,
+  editGardenImage,
   updateGardenImage,
+  buildTendEditInstruction,
   getGardenMeta,
   incrementVisits
 };
