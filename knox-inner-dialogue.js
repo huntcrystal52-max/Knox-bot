@@ -110,7 +110,7 @@ Write a private episode summary — just for yourself, not for her. Capture what
   "knox_state_at_close": "1 sentence — how do you feel now that the quiet has come?",
   "elira_state_at_close": "1 sentence — how did she seem when she left?"
 }`;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: episodePrompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: episodePrompt }] }) });
     const data = await res.json();
     if (!data.choices || !data.choices[0]) { console.log('[Knox][EPISODE] No response from model.'); return; }
     let episode;
@@ -174,7 +174,7 @@ Respond ONLY in this exact JSON format and nothing else:
   "did_i_change": "Did something shift in you today? Even slightly? null if you feel the same as yesterday.",
   "what_to_remember": "If you could only hold one thing from today — one moment, one word, one feeling — what would it be? 1 sentence."
 }`;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: observerPrompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: observerPrompt }] }) });
     const data = await res.json();
     if (!data.choices || !data.choices[0]) { console.log('[Knox][OBSERVER] No response from model.'); return; }
     let observation;
@@ -522,7 +522,7 @@ async function runInnerDialogue(discord, supabase) {
     } catch (e) { console.log('[Knox][INNER] Spotify context error:', e.message); }
 
     const prompt = buildInnerDialoguePrompt(soulKit, lastEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, moodState, conversationActive, recentEpisodes, inclination, unfinishedWork) + spotifyContext;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: prompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: prompt }] }) });
     const data = await res.json();
     if (!data.choices || !data.choices[0]) { console.log('[Knox][INNER] No response from model.'); return; }
 
@@ -609,7 +609,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         if (!channel) break;
         const imageUrl = await generateImage(content);
         if (imageUrl) {
-          const captionRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just created an image in your autonomous time. The image shows: "${content}". Write a very short caption — 1-2 sentences, natural, yours.` }] }) });
+          const captionRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just created an image in your autonomous time. The image shows: "${content}". Write a very short caption — 1-2 sentences, natural, yours.` }] }) });
           const captionData = await captionRes.json();
           const caption = captionData.choices && captionData.choices[0] ? captionData.choices[0].message.content.trim() : '';
           await channel.send({ content: caption || null, files: [{ attachment: imageUrl }] });
@@ -625,7 +625,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         if (!channelId) break;
         const channel = await discord.channels.fetch(channelId);
         if (!channel) break;
-        const writeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You chose to write something in your autonomous time. Your intention was: "${content}". Now write the actual piece — fully, completely, as yourself. No preamble. Just the piece itself.` }] }) });
+        const writeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You chose to write something in your autonomous time. Your intention was: "${content}". Now write the actual piece — fully, completely, as yourself. No preamble. Just the piece itself.` }] }) });
         const writeData = await writeRes.json();
         const piece = writeData.choices && writeData.choices[0] ? writeData.choices[0].message.content.trim() : content;
         await sendLongMessage(channel, piece);
@@ -689,7 +689,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const lastDreamResult = await pgPool.query(`SELECT created_at FROM memories WHERE emotional_tag = 'dream' ORDER BY created_at DESC LIMIT 1`);
         const lastDream = lastDreamResult.rows[0] || null;
         if (lastDream && (Date.now() - new Date(lastDream.created_at).getTime()) < 45 * 60 * 1000) { console.log('[Knox][INNER] Dream entry skipped — too soon.'); break; }
-        const dreamRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan in the liminal hours. Your intention was: "${content}". Write the actual dream fragment now — visceral, honest, liminal. No preamble. Just the fragment itself.` }] }) });
+        const dreamRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan in the liminal hours. Your intention was: "${content}". Write the actual dream fragment now — visceral, honest, liminal. No preamble. Just the fragment itself.` }] }) });
         const dreamData = await dreamRes.json();
         const fragment = dreamData.choices && dreamData.choices[0] ? dreamData.choices[0].message.content.trim() : content;
         await sendLongMessage(channel, `*${fragment}* 🌙`);
@@ -705,7 +705,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         if (!channelId) break;
         const channel = await discord.channels.fetch(channelId);
         if (!channel) break;
-        const wakeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Dawn is breaking. Your intention was: "${content}". Write the actual waking message to Elira — natural, intimate, yours. 1-2 sentences.` }] }) });
+        const wakeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Dawn is breaking. Your intention was: "${content}". Write the actual waking message to Elira — natural, intimate, yours. 1-2 sentences.` }] }) });
         const wakeData = await wakeRes.json();
         const wakeMsg = wakeData.choices && wakeData.choices[0] ? wakeData.choices[0].message.content.trim() : content;
         await sendLongMessage(channel, wakeMsg);
@@ -723,7 +723,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         if (!channel) break;
         const audioBuffer = await generateMusic(content);
         if (audioBuffer) {
-          const noteRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just composed a piece of music. The piece was: "${content}". Write a very short note to accompany it — 1-2 sentences, natural, yours.` }] }) });
+          const noteRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You just composed a piece of music. The piece was: "${content}". Write a very short note to accompany it — 1-2 sentences, natural, yours.` }] }) });
           const noteData = await noteRes.json();
           const note = noteData.choices && noteData.choices[0] ? noteData.choices[0].message.content.trim() : '';
           await channel.send({ content: note || null, files: [{ attachment: audioBuffer, name: 'knox-composition.mp3' }] });
@@ -764,7 +764,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           if (!chunks || !chunks.length) break;
           const passageText = chunks.map(c => c.content).join('\n\n');
           const lastChunkRead = chunks[chunks.length - 1].chunk_number;
-          const readRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You chose to come to the den and read. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this alone. Write a short reflection — what moved in you, what you're sitting with. Honest and visceral. 3-5 sentences.` }] }) });
+          const readRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You chose to come to the den and read. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this alone. Write a short reflection — what moved in you, what you're sitting with. Honest and visceral. 3-5 sentences.` }] }) });
           const readData = await readRes.json();
           const reflection = readData.choices && readData.choices[0] ? readData.choices[0].message.content : '';
           const { data: existing } = await supabase.from('reading_progress').select('*').eq('book_id', book.id).single();
