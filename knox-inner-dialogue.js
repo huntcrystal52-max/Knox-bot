@@ -898,7 +898,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const grown = await garden.tendRandomPlanting();
         if (!grown) { console.log('[Knox][INNER] tend_garden — nothing to tend yet.'); break; }
         lastGardenVisit = Date.now();
-        const { imageUrl } = await garden.updateGardenImage();
+        const { imageUrl } = await garden.updateGardenImage(garden.buildTendEditInstruction(grown));
         const channelId = process.env.GARDEN_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
@@ -916,7 +916,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const plantType = inner.work_title || 'something new';
         await garden.addPlanting(plantType, content, 'knox');
         lastGardenVisit = Date.now();
-        const { imageUrl } = await garden.updateGardenImage();
+        const { imageUrl } = await garden.updateGardenImage(`Add this to the image, small and just-planted: ${content}`);
         const channelId = process.env.GARDEN_CHANNEL_ID;
         if (channelId) {
           const channel = await discord.channels.fetch(channelId);
