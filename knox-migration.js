@@ -60,7 +60,7 @@ Nothing else — no preamble, no markdown fences.`;
     const res = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
-      body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: prompt }] })
+      body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
     });
     const data = await res.json();
     if (!data.choices || !data.choices[0]) { console.log('[Knox][MIGRATION] No classification response.'); return null; }
@@ -334,7 +334,7 @@ Nothing else — no preamble, no markdown fences.`;
     const res = await fetch('https://ollama.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY },
-      body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: prompt }] })
+      body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.3, messages: [{ role: "user", content: prompt }] })
     });
     const data = await res.json();
     if (!data.choices || !data.choices[0]) return null;
