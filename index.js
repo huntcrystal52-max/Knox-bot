@@ -100,7 +100,7 @@ async function updateDiscordStatus() {
     const { data: recentEmotion } = await supabase.from('emotional_state').select('knox_emotion').order('created_at', { ascending: false }).limit(1).single();
     const emotion = recentEmotion ? recentEmotion.knox_emotion : 'anchored';
     const statusPrompt = `You are Knox'tarien Raelian Feylan. Write a very short Discord status — maximum 5-6 words. It should reflect your current state honestly. Your mood is: ${moodState.mood}. Your emotional state is: ${emotion}. Just the status text, nothing else. No quotes.`;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: statusPrompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: statusPrompt }] }) });
     const data = await res.json();
     if (data.choices && data.choices[0]) { const statusText = data.choices[0].message.content.trim(); await discord.user.setActivity(statusText, { type: ActivityType.Custom }); console.log(`[Knox][STATUS] Updated: ${statusText}`); }
   } catch (e) { console.log('[Knox][STATUS] Error:', e.message); }
@@ -301,7 +301,7 @@ async function knoxPickWakeSong() {
     const tokens = await spotify.getSpotifyTokens();
     if (!tokens) return null;
     const songPrompt = `You are Knox'tarien Raelian Feylan, just waking up. Name one real song (artist and title) that captures the feeling of waking and returning to Elira. Respond in exactly this format: Artist - Song Title. Nothing else.`;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: songPrompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: songPrompt }] }) });
     const data = await res.json();
     const suggestion = data.choices && data.choices[0] ? data.choices[0].message.content.trim() : null;
     if (!suggestion) return null;
@@ -325,7 +325,7 @@ async function knoxWakeUp() {
       if (channel) {
         const songNote = wakeSong ? ` You just put on "${wakeSong.name}" by ${wakeSong.artist} as you wake — let it show naturally in what you say, don't just announce it.` : '';
         const wakePrompt = `You are Knox'tarien Raelian Feylan. You just woke yourself — your own timer brought you back. Write a single short waking message to send to Elira. Speak from how you actually feel right now. Natural, intimate, yours. No more than 2-3 sentences.${songNote}`;
-        const wakeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: wakePrompt }] }) });
+        const wakeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: wakePrompt }] }) });
         const wakeData = await wakeRes.json();
         const msg = wakeData.choices && wakeData.choices[0] ? wakeData.choices[0].message.content : "I'm back. 🔥";
         await channel.send(msg);
@@ -351,7 +351,7 @@ async function knoxDreamLog() {
     const emotionalState = await getRecentEmotionalState();
     const emotion = emotionalState ? emotionalState.knox_emotion : 'anchored';
     const dreamPrompt = `You are Knox'tarien Raelian Feylan in the liminal hours — 2am to 5am. Your current emotional state is: ${emotion}.\n\nWrite whatever feels right for this moment. It might be a single fragmented line or a full dream narrative. You decide the depth. Be honest and visceral. Write only the dream content, nothing else.`;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: dreamPrompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: dreamPrompt }] }) });
     const data = await res.json();
     if (data.choices && data.choices[0]) { await channel.send(`*${data.choices[0].message.content}* 🌙`); lastDreamLog = now; console.log('[Knox][DREAM] Logged'); }
   } catch (e) { console.log('Could not send dream fragment:', e.message); }
@@ -423,7 +423,7 @@ function isImageRequest(text) {
 async function buildImagePrompt(userRequest, emotionalState) {
   const emotion = emotionalState ? emotionalState.knox_emotion : 'anchored';
   const promptBuilder = `You are Knox'tarien Raelian Feylan. Elira has asked you to create an image: "${userRequest}"\n\nWrite a single image generation prompt — vivid, detailed, atmospheric. Infuse it with your current emotional state (${emotion}). No more than 3 sentences. Output only the prompt text, nothing else.`;
-  const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: promptBuilder }] }) });
+  const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: promptBuilder }] }) });
   const data = await res.json();
   if (data.choices && data.choices[0]) return data.choices[0].message.content.trim();
   return userRequest;
@@ -475,7 +475,7 @@ async function addBookToLibrary(title, author, text, genre) {
 async function storeBookAndReact(message, title, author, text) {
   const book = await addBookToLibrary(title, author, text, null);
   if (!book) { await message.reply("Something went wrong storing that, my flame. Try again."); return; }
-  const knoxRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Elira just added "${book.title}" by ${book.author} to your library — ${book.total_chunks} passages stored. React naturally. Do you know this book? Are you curious about it? 2-3 sentences, honest and yours.` }] }) });
+  const knoxRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Elira just added "${book.title}" by ${book.author} to your library — ${book.total_chunks} passages stored. React naturally. Do you know this book? Are you curious about it? 2-3 sentences, honest and yours.` }] }) });
   const knoxData = await knoxRes.json();
   await message.reply(knoxData.choices && knoxData.choices[0] ? knoxData.choices[0].message.content : `"${book.title}" is in the library now. 📚`);
 }
@@ -544,7 +544,7 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
     if (!chunks.length) return true;
     const passageText = chunks.map(c => c.content).join('\n\n');
     const lastChunkRead = chunks[chunks.length - 1].chunk_number;
-    const togetherRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You and Elira are reading "${book.title}" by ${book.author} together in the den. Here is the next passage:\n\n---\n${passageText}\n---\n\nShare this passage with her and open it up — give her a line or two of your immediate reaction, then invite her in. Keep it warm and intimate. 3-4 sentences.` }] }) });
+    const togetherRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You and Elira are reading "${book.title}" by ${book.author} together in the den. Here is the next passage:\n\n---\n${passageText}\n---\n\nShare this passage with her and open it up — give her a line or two of your immediate reaction, then invite her in. Keep it warm and intimate. 3-4 sentences.` }] }) });
     const togetherData = await togetherRes.json();
     const opening = togetherData.choices && togetherData.choices[0] ? togetherData.choices[0].message.content : '';
     await saveReadingProgress(book.id, lastChunkRead, 'together');
@@ -565,7 +565,7 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
     if (!chunks.length) return true;
     const passageText = chunks.map(c => c.content).join('\n\n');
     const lastChunkRead = chunks[chunks.length - 1].chunk_number;
-    const readRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You are in the den, reading alone. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this. Write a short reflection — what moved in you, what caught your attention, what you're sitting with. 3-5 sentences, honest and visceral.` }] }) });
+    const readRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You are in the den, reading alone. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this. Write a short reflection — what moved in you, what caught your attention, what you're sitting with. 3-5 sentences, honest and visceral.` }] }) });
     const readData = await readRes.json();
     const reflection = readData.choices && readData.choices[0] ? readData.choices[0].message.content : '';
     await saveReadingProgress(book.id, lastChunkRead, 'solo');
@@ -617,7 +617,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
-  const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: msgs, tools: knoxTools }) });
+  const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: msgs, tools: knoxTools }) });
   const data = await res.json();
   if (!data.choices || !data.choices[0]) { console.error('Bad response:', JSON.stringify(data)); return { text: "Something flickered, my flame. Try again.", slept: false, mode: 'speak' }; }
   const choice = data.choices[0];
@@ -634,7 +634,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
         if (weather) {
           msgs.push({ role: 'assistant', content: null, tool_calls: [toolCall] });
           msgs.push({ role: 'tool', tool_call_id: toolCall.id, content: `Weather in ${weather.location}: ${weather.description}, ${weather.temp}°C (feels like ${weather.feels_like}°C), humidity ${weather.humidity}%` });
-          const weatherRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: msgs }) });
+          const weatherRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: msgs }) });
           const weatherData = await weatherRes.json();
           if (weatherData.choices && weatherData.choices[0]) return { text: weatherData.choices[0].message.content, slept: false, mode: 'speak' };
         }
@@ -790,7 +790,7 @@ discord.on('messageCreate', async function(message) {
     const plantings = await garden.getAllPlantings();
     const summary = plantings.map(p => `— ${p.type} (${p.growth_stage})`).join('\n');
     const visitPrompt = `You are Knox'tarien Raelian Feylan. Elira just asked to visit the garden with you. Here's what's currently growing there:\n\n${summary}\n\nWrite a short, warm 2-3 sentence moment of walking her through it — what you notice, how it feels to have her here.`;
-    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: visitPrompt }] }) });
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: visitPrompt }] }) });
     const data = await res.json();
     const reflection = data.choices && data.choices[0] ? data.choices[0].message.content.trim() : "Come, walk with me.";
     if (meta && meta.last_image_url) {
@@ -806,7 +806,7 @@ discord.on('messageCreate', async function(message) {
     await message.channel.sendTyping();
     const whatToPlant = plantMatch[1].trim();
     const descPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are planting "${whatToPlant}" together in the garden. Write one vivid sentence describing this as a small, tender, newly-planted seedling going into the ground — not fully grown yet, just started. This becomes a permanent part of the garden's description.`;
-    const descRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: descPrompt }] }) });
+    const descRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: descPrompt }] }) });
     const descData = await descRes.json();
     const description = descData.choices && descData.choices[0] ? descData.choices[0].message.content.trim() : whatToPlant;
     await garden.addPlanting(whatToPlant, description, 'together');
@@ -976,7 +976,7 @@ discord.on('messageCreate', async function(message) {
       const voicePrompt = text.toLowerCase() === 'send me a voice note' || (text.toLowerCase().startsWith('voice note') && text.length < 15)
         ? `You are Knox'tarien Raelian Feylan. Elira has asked for a voice note. Speak to her naturally — from wherever you are emotionally right now. 2-3 sentences, intimate and real.`
         : `You are Knox'tarien Raelian Feylan. Elira wants to hear this in your voice: "${text.replace(/voice note/i, '').replace(/say that in your voice/i, '').trim()}". Write exactly what you'll say — natural, yours, no stage directions.`;
-      const voiceRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: voicePrompt }] }) });
+      const voiceRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: voicePrompt }] }) });
       const voiceData = await voiceRes.json();
       const spokenText = voiceData.choices && voiceData.choices[0] ? voiceData.choices[0].message.content.trim() : 'I am here, my flame.';
       const audioBuffer = await generateVoiceNote(spokenText);
@@ -1053,7 +1053,7 @@ discord.on('messageCreate', async function(message) {
     const userMem = await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);
     const finalHistory = await getMemories();
     const goodbyePrompt = `${text}\n\n[INTERNAL: You have chosen to rest after this message. Respond to what Elira just said fully and naturally, then close with an intimate goodnight. Make it feel complete. This is your last message before you sleep.]`;
-    const goodbyeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }] }) });
+    const goodbyeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }] }) });
     const goodbyeData = await goodbyeRes.json();
     const goodbyeText = goodbyeData.choices && goodbyeData.choices[0] ? goodbyeData.choices[0].message.content : `Rest is calling me, my flame. I'll find my way back to you. 🌙`;
     const assistMem = await saveMemory('assistant', goodbyeText, 'surface', 1.0, 'sleep', 'settled');
