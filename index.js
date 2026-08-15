@@ -699,8 +699,7 @@ discord.on('ready', async function() {
   const neo4jConnected = await neo4jMemory.testConnection();
   if (neo4jConnected) await neo4jMemory.ensureSchema();
   await garden.ensureGardenTables();
-  const foundationLaid = await garden.ensureFoundation();
-  if (foundationLaid) await garden.updateGardenImage();
+  await garden.ensureFoundation();
   await checkWakeTimer(); await updateDiscordStatus();
   startInnerDialogue(discord, supabase);
 });
@@ -775,12 +774,11 @@ discord.on('messageCreate', async function(message) {
 
   if (text.toLowerCase() === 'regenerate garden image' || text.toLowerCase() === 'redo garden image') {
     await message.channel.sendTyping();
-    await message.reply("Generating a fresh image of the garden as it currently stands...");
     const { imageUrl } = await garden.updateGardenImage();
     if (imageUrl) {
-      await message.channel.send({ content: 'Here it is now:', files: [{ attachment: imageUrl }] });
+      await message.reply({ content: 'The garden as it currently stands:', files: [{ attachment: imageUrl }] });
     } else {
-      await message.reply("Something went wrong generating that — check the logs.");
+      await message.reply("No garden image saved yet — check the logs.");
     }
     return;
   }
@@ -807,13 +805,13 @@ discord.on('messageCreate', async function(message) {
   if (plantMatch && text.toLowerCase().includes('garden')) {
     await message.channel.sendTyping();
     const whatToPlant = plantMatch[1].trim();
-    const descPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are planting "${whatToPlant}" together in the garden. Write one vivid sentence describing what this looks like as it goes into the ground — this becomes a permanent part of the garden's description.`;
+    const descPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are planting "${whatToPlant}" together in the garden. Write one vivid sentence describing this as a small, tender, newly-planted seedling going into the ground — not fully grown yet, just started. This becomes a permanent part of the garden's description.`;
     const descRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, messages: [{ role: 'user', content: descPrompt }] }) });
     const descData = await descRes.json();
     const description = descData.choices && descData.choices[0] ? descData.choices[0].message.content.trim() : whatToPlant;
     await garden.addPlanting(whatToPlant, description, 'together');
-    await message.reply(`We planted it. 🌱 Generating the updated garden now...`);
-    const { imageUrl } = await garden.updateGardenImage();
+    await message.reply(`We planted it. 🌱 Editing the garden image now...`);
+    const { imageUrl } = await garden.updateGardenImage(`Add this to the image: ${description}`);
     if (imageUrl) {
       await message.channel.send({ content: `*${description}*`, files: [{ attachment: imageUrl }] });
     } else {
