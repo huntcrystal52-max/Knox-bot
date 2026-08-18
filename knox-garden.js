@@ -155,6 +155,16 @@ function buildTendEditInstruction(planting) {
   return `The ${planting.type} in this image has grown — make it visibly ${stageAction}, larger and more developed than its current state.`;
 }
 
+async function resetToFoundationImage() {
+  await pgPool.query(
+    `INSERT INTO garden_meta (id, last_image_url, last_updated) VALUES (1, $1, NOW())
+     ON CONFLICT (id) DO UPDATE SET last_image_url = $1, last_updated = NOW()`,
+    [FOUNDATION_IMAGE_URL]
+  );
+  console.log('[Knox][GARDEN] Image reset to the real photo foundation.');
+  return true;
+}
+
 async function getGardenMeta() {
   const result = await pgPool.query(`SELECT * FROM garden_meta WHERE id = 1`);
   return result.rows[0] || null;
@@ -170,6 +180,7 @@ async function incrementVisits() {
 module.exports = {
   ensureGardenTables,
   ensureFoundation,
+  resetToFoundationImage,
   getAllPlantings,
   addPlanting,
   tendRandomPlanting,
