@@ -657,18 +657,42 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
 
 // ─── IMAGE VISION ─────────────────────────────────────────────────────────────
 
+// Free-tier vision models get hit with shared demand across everyone using
+// OpenRouter, not just us — a 429 means "overloaded right now", not broken.
+// Trying a short list in sequence means one busy model doesn't block this.
+const VISION_MODEL_FALLBACKS = [
+  process.env.OPENROUTER_MODEL,
+  'google/gemma-4-26b-a4b-it:free',
+  'meta-llama/llama-4-scout:free'
+].filter(Boolean);
+
+async function requestImageDescription(imageUrl) {
+  for (const model of VISION_MODEL_FALLBACKS) {
+    try {
+      const visionRes = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }, { type: 'text', text: 'Describe what you see in this image in detail.' }] }] }) });
+      const visionData = await visionRes.json();
+      if (visionData.choices && visionData.choices[0]) {
+        console.log('[Knox][VISION] Description received via', model);
+        return visionData.choices[0].message.content;
+      }
+      console.log('[Knox][VISION]', model, '— no usable response. Status:', visionRes.status, '— Body:', JSON.stringify(visionData).slice(0, 300));
+    } catch (e) {
+      console.log('[Knox][VISION]', model, '— request error:', e.message);
+    }
+  }
+  return null;
+}
+
 async function handleImageMessage(message, text, moodState, previousEmotionalState) {
   const imageUrl = message.attachments.first().url;
   console.log('[Knox][VISION] Image received, requesting description...');
   try {
-    const visionRes = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY }, body: JSON.stringify({ model: process.env.OPENROUTER_MODEL, messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }, { type: 'text', text: 'Describe what you see in this image in detail.' }] }] }) });
-    const visionData = await visionRes.json();
-    if (!visionData.choices || !visionData.choices[0]) {
-      console.log('[Knox][VISION] No usable response. Status:', visionRes.status, '— Body:', JSON.stringify(visionData).slice(0, 500));
+    const imageDescription = await requestImageDescription(imageUrl);
+    if (!imageDescription) {
+      console.log('[Knox][VISION] All vision models failed or were unavailable.');
       return false;
     }
-    const imageDescription = visionData.choices[0].message.content;
-    console.log('[Knox][VISION] Description received, generating response...');
+    console.log('[Knox][VISION] Generating response...');
     const history = await getMemories();
     const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
     const result = await getResponse(knoxPrompt, history, moodState, previousEmotionalState);
