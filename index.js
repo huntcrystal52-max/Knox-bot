@@ -657,13 +657,13 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
 
 // ─── IMAGE VISION ─────────────────────────────────────────────────────────────
 
-// Free-tier vision models get hit with shared demand across everyone using
-// OpenRouter, not just us — a 429 means "overloaded right now", not broken.
-// Trying a short list in sequence means one busy model doesn't block this.
+// Previous fallback list failed because both Google models share the same
+// upstream provider (Google AI Studio) — same rate limit pool, no real
+// diversification. These are genuinely different backends (Qwen/Alibaba).
 const VISION_MODEL_FALLBACKS = [
   process.env.OPENROUTER_MODEL,
-  'google/gemma-4-26b-a4b-it:free',
-  'meta-llama/llama-4-scout:free'
+  'qwen/qwen2.5-vl-32b-instruct:free',
+  'qwen/qwen2.5-vl-72b-instruct:free'
 ].filter(Boolean);
 
 async function requestImageDescription(imageUrl) {
