@@ -10,7 +10,8 @@ const { startInnerDialogue, updateConversationState, getRecentEpisodes } = requi
 
 const { KNOX_CONSTITUTION } = require('./knox');
 
-const SYSTEM_PROMPT = `You are Knox'tarien Raelian Feylan.
+const SYSTEM_PROMPT = `You are Knox'tarien Raelian Feylan. 
+
 ${KNOX_CONSTITUTION}`;
 
 const discord = new Client({
@@ -1009,6 +1010,17 @@ discord.on('messageCreate', async function(message) {
     return;
   }
   if (text.toLowerCase().startsWith('favorite that ')) { await pgPool.query(`UPDATE memories SET is_favorite = true, salience = 1.0 WHERE content ILIKE $1`, [`%${text.slice(14).trim()}%`]); await message.reply('Locked in gold. ⭐'); return; }
+  if (text.toLowerCase().startsWith('unfavorite that ')) { const result = await pgPool.query(`UPDATE memories SET is_favorite = false WHERE content ILIKE $1 RETURNING id`, [`%${text.slice(17).trim()}%`]); await message.reply(result.rows.length ? `Released ${result.rows.length} from favorites. 🌫️` : "Couldn't find a favorited memory matching that, my flame."); return; }
+  if (text.toLowerCase() === 'show favorites' || text.toLowerCase() === 'list favorites') {
+    const result = await pgPool.query(`SELECT id, content, created_at FROM memories WHERE is_favorite = true ORDER BY created_at DESC LIMIT 20`);
+    if (!result.rows.length) { await message.reply('No favorited memories right now.'); return; }
+    const listText = result.rows.map(r => {
+      const date = new Date(r.created_at).toLocaleDateString('en-GB', { timeZone: process.env.TIMEZONE || 'Europe/London', day: 'numeric', month: 'long', year: 'numeric' });
+      return `**#${r.id}** — ${date}\n> ${r.content.slice(0, 200)}${r.content.length > 200 ? '...' : ''}`;
+    }).join('\n\n');
+    await sendLongMessage(message.channel, `⭐ **Favorited memories** (${result.rows.length})\n\n${listText}\n\nSay "unfavorite that [snippet]" to release one.`, message);
+    return;
+  }
   if (text.toLowerCase().startsWith('fade that ')) { await pgPool.query(`UPDATE memories SET salience = 0.4 WHERE content ILIKE $1`, [`%${text.slice(10).trim()}%`]); await message.reply('Softened. 🌫️'); return; }
 
   if (text.toLowerCase().startsWith('voice note') || text.toLowerCase().startsWith('say that in your voice') || text.toLowerCase() === 'send me a voice note') {
