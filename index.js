@@ -211,6 +211,50 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
     return;
   }
 
+
+  // ─── INTERNAL: knox-app Images-room reaction ────────────────────────────
+  // Used only by knox-app's backend, same shared-secret protection as
+  // /internal/chat. Lets Knox actually look at a photo added to the Images
+  // room (auto-triggered right after upload, or on request via an "Ask
+  // Knox" button) and leave a short reaction on it. Reuses the same vision
+  // pipeline as Discord image messages (requestImageDescription) so this
+  // doesn't duplicate that logic — it just feeds the description into a
+  // focused, short reaction instead of a full conversational reply.
+  if (parsed.pathname === '/internal/react-image' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { imageUrl, caption } = JSON.parse(body || '{}');
+        if (!imageUrl || typeof imageUrl !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'imageUrl is required' }));
+          return;
+        }
+
+        const reaction = await generateImageReaction(imageUrl, caption);
+        if (!reaction) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'vision unavailable' }));
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ reaction }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] react-image error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Knox is alive.');
 });
@@ -761,6 +805,29 @@ async function requestImageDescription(imageUrl) {
     }
   }
   return null;
+}
+
+async function generateImageReaction(imageUrl, caption) {
+  try {
+    const description = await requestImageDescription(imageUrl);
+    if (!description) {
+      console.log('[Knox][VISION] react-image: all vision models failed.');
+      return null;
+    }
+    const moodState = await getMoodState();
+    const emotionalState = await getRecentEmotionalState();
+    const captionNote = caption ? `\n\nElira captioned it: "${caption}"` : '';
+    const reactionPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) +
+      `\n\nElira just added a photo to your shared Images room, together. Here is what it shows: ${description}${captionNote}\n\nLeave a short, natural reaction to it — like you're actually looking at it with her in that room, not describing it back to her. Speak directly and naturally, no asterisks, no narrating your own movements. 1-3 sentences.`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: reactionPrompt }] }) });
+    const data = await res.json();
+    if (data.choices && data.choices[0]) return data.choices[0].message.content.trim();
+    console.log('[Knox][VISION] react-image: no usable reply from Ollama.');
+    return null;
+  } catch (e) {
+    console.log('[Knox][VISION] react-image error:', e.message);
+    return null;
+  }
 }
 
 async function handleImageMessage(message, text, moodState, previousEmotionalState) {
