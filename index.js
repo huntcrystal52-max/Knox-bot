@@ -144,6 +144,12 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // ─── INTERNAL: knox-app chat relay ─────────────────────────────────────────
+  // Used only by knox-app's backend (never exposed publicly on its own —
+  // protected by a shared secret). Runs a message through the exact same
+  // brain Discord uses: same prompt-building, same Ollama call, same
+  // Postgres/Supabase/Neo4j memory writes — so a conversation started here
+  // and continued on Discord (or the reverse) is one continuous thread.
   if (parsed.pathname === '/internal/chat' && req.method === 'POST') {
     if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
