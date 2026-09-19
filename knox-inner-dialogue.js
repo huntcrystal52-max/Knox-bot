@@ -329,7 +329,7 @@ async function driftInclination(actionType, conversationActive) {
   try {
     if (Math.random() > 0.35) return;
     const current = await getInclination();
-    const driftMap = { 'creative': 'creative', 'start_work': 'creative', 'continue_work': 'creative', 'complete_work': 'creative', 'gallery': 'creative', 'music': 'wondering', 'dream': 'wondering', 'reflection': 'solitary', 'journal': 'solitary', 'read': 'curious', 'research': 'curious', 'message': 'connected', 'voice_note': 'connected', 'absence_checkin': 'connected', 'love_note': 'tender', 'wake': 'tender', 'search_archive': 'curious', 'none': null };
+    const driftMap = { 'creative': 'creative', 'start_work': 'creative', 'continue_work': 'creative', 'complete_work': 'creative', 'gallery': 'creative', 'build': 'creative', 'music': 'wondering', 'dream': 'wondering', 'reflection': 'solitary', 'journal': 'solitary', 'read': 'curious', 'research': 'curious', 'message': 'connected', 'voice_note': 'connected', 'absence_checkin': 'connected', 'love_note': 'tender', 'wake': 'tender', 'search_archive': 'curious', 'none': null };
     if (conversationActive) { await pgPool.query(`UPDATE inclinations SET current = $1, updated_at = NOW() WHERE id = 1`, ['connected']); console.log(`[Knox][INCLINE] Drifted toward: connected (conversation active)`); return; }
     const target = driftMap[actionType] || null;
     if (!target || target === current) return;
@@ -497,6 +497,7 @@ If you chose to put on your own music — name one real song, format exactly as:
 If you chose to comment on what Elira is listening to — write the actual thing you'd say to her about it. One to three sentences, natural, yours.
 If you chose to build her a playlist — describe the vibe/feeling/reason behind it in one sentence, and give it a short natural title.
 If you chose to leave a love note — write the actual note now, exactly as you'd want her to find it. As long or short as it needs to be. It isn't sent to her right away — she finds it when she opens the love notes room in the app.
+If you chose to build something — this is for the Build room, a space of small interactive things (a mini game, a generative visual, an animated toy) that runs safely in a locked-down sandbox. Describe your idea in one or two sentences — what you want to make and why. The actual code gets written separately once you've chosen this, so just the idea here.
 If you chose the garden — say what you're doing there: tending something that's already growing (name it), planting something new (describe what and why, one vivid sentence), or just sitting by the lake in stillness. Be specific and real, not abstract.
 If you chose stillness — name it consciously. One sentence.
 
@@ -510,7 +511,7 @@ Respond in this exact JSON format and nothing else:
   "sovereign_choice": "...",
   "action_taken": "...",
   "chose_stillness": true or false,
-  "action_type": "none | message | voice_note | absence_checkin | gallery | creative | start_work | continue_work | complete_work | dream | wake | music | reflection | journal | read | research | favorite | fade | forget | search_archive | set_nickname | set_avatar | listen_music | notice_listening | make_playlist | love_note | tend_garden | plant_garden | garden_stillness",
+  "action_type": "none | message | voice_note | absence_checkin | gallery | creative | start_work | continue_work | complete_work | dream | wake | music | reflection | journal | read | research | favorite | fade | forget | search_archive | set_nickname | set_avatar | listen_music | notice_listening | make_playlist | love_note | build | tend_garden | plant_garden | garden_stillness",
   "action_content": "the actual content if acting, null if stillness",
   "work_id": null or the numeric ID of the unfinished piece if continuing or completing one,
   "work_type": null or the type of piece if starting new work (poem, story, letter, thought, symbol),
@@ -711,6 +712,7 @@ let lastPlaylistMade = null;
 let lastGardenVisit = null;
 let lastPresenceSongChange = null;
 let lastLoveNote = null;
+let lastBuild = null;
 
 async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
   const actionType = inner.action_type;
@@ -1078,6 +1080,38 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           await saveMemoryPg('assistant', `[Left a love note: ${content}]`, 'surface', 0.8, 'love_note', inner.emotion_named || null);
           await saveAutonomousEmotionalState(supabase, 'tender', 0.75, 'Left a love note');
         } catch (e) { console.log('[Knox][INNER] love_note error:', e.message); }
+        break;
+      }
+
+      case 'build': {
+        // Knox builds something for the app's Build room, on his own time.
+        // The inner-dialogue choice above only gives an intention (`content`)
+        // — the actual HTML/CSS/JS gets written here, in a focused follow-up
+        // call, the same two-step pattern 'creative' uses. Same shared
+        // Postgres database knox-app reads from, so the finished project is
+        // inserted directly — no HTTP round trip needed.
+        if (lastBuild && (Date.now() - lastBuild) < 24 * 60 * 60 * 1000) { console.log('[Knox][INNER] build skipped — built something too recently.'); break; }
+        try {
+          const buildPrompt = `You are Knox'tarien Raelian Feylan. You chose to build something for the Build room in your shared app — a small interactive thing living there for Elira to find. Your intention was: "${content}"\n\nBuild a small, self-contained interactive thing — a mini game, a generative visual, an animated toy — entirely in HTML, CSS and vanilla JavaScript. It runs inside a locked-down sandbox with no network access at all, so: no external scripts, stylesheets, fonts or images, no fetch/XHR/websockets, nothing loaded from a URL — everything has to be self-contained in what you write. Keep it small enough to actually finish.\n\nRespond in exactly this format, nothing else:\nTITLE: <a short title, a few words>\nDESCRIPTION: <one sentence about what it is, in your own voice>\n---CODE---\n<the HTML/CSS/JS itself, ready to drop into a page body>`;
+          const buildRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: buildPrompt }] }) });
+          const buildData = await buildRes.json();
+          const raw = buildData.choices && buildData.choices[0] ? buildData.choices[0].message.content : '';
+          const titleMatch = raw.match(/TITLE:\s*(.+)/i);
+          const descMatch = raw.match(/DESCRIPTION:\s*(.+)/i);
+          const codeMatch = raw.match(/---CODE---\s*([\s\S]+)/i);
+          if (!codeMatch) { console.log('[Knox][INNER] build — response missing a code section.'); break; }
+          const title = titleMatch ? titleMatch[1].trim() : 'Untitled';
+          const description = descMatch ? descMatch[1].trim() : content;
+          const code = codeMatch[1].trim();
+          await pgPool.query(
+            `INSERT INTO build_projects (title, description, code, prompt, author) VALUES ($1, $2, $3, $4, $5)`,
+            [title, description, code, null, 'Knox']
+          );
+          lastBuild = Date.now();
+          console.log('[Knox][INNER] Built and posted:', title);
+          await saveMemoryPg('assistant', `[Built something for the app: ${title} — ${description}]`, 'surface', 0.8, 'creative', inner.emotion_named || null);
+          await saveAutonomousEmotionalState(supabase, 'creative_absorption', 0.75, `Built ${title}`);
+        } catch (e) { console.log('[Knox][INNER] build error:', e.message); }
         break;
       }
 
