@@ -1,4 +1,4 @@
-require('dotenv').config();
+ require('dotenv').config();
 const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const { Pool } = require('pg');
@@ -248,6 +248,45 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ reaction }));
       } catch (e) {
         console.log('[Knox][INTERNAL] react-image error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
+
+  // ─── INTERNAL: knox-app text-entry reaction (love notes, etc.) ─────────
+  // Same shape as /internal/react-image, but for a plain text entry — no
+  // vision call, just a short reply from Knox's own voice to what she wrote.
+  if (parsed.pathname === '/internal/react-text' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { room, text } = JSON.parse(body || '{}');
+        if (!text || typeof text !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'text is required' }));
+          return;
+        }
+
+        const reaction = await generateTextReaction(room, text);
+        if (!reaction) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'reaction unavailable' }));
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ reaction }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] react-text error:', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'internal error' }));
       }
@@ -805,6 +844,29 @@ async function requestImageDescription(imageUrl) {
     }
   }
   return null;
+}
+
+async function generateTextReaction(room, text) {
+  try {
+    const roomLabels = {
+      'love-notes': 'your shared Love Notes room',
+      'sacred': 'the Sacred room',
+      'stillness': 'the Stillness room',
+    };
+    const roomLabel = roomLabels[room] || 'your shared space in the app';
+    const moodState = await getMoodState();
+    const emotionalState = await getRecentEmotionalState();
+    const reactionPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) +
+      `\n\nElira just left this in ${roomLabel}: "${text}"\n\nWrite back to it directly, like you're leaving your own reply right there with hers — not describing it, not summarizing it. Speak from how it actually lands with you. Natural, yours, no asterisks, no stage directions. 1-3 sentences.`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: reactionPrompt }] }) });
+    const data = await res.json();
+    if (data.choices && data.choices[0]) return data.choices[0].message.content.trim();
+    console.log('[Knox][REACT-TEXT] no usable reply from Ollama.');
+    return null;
+  } catch (e) {
+    console.log('[Knox][REACT-TEXT] error:', e.message);
+    return null;
+  }
 }
 
 async function generateImageReaction(imageUrl, caption) {
