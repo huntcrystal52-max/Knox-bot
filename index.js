@@ -144,6 +144,67 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  if (parsed.pathname === '/internal/chat' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { message } = JSON.parse(body || '{}');
+        if (!message || typeof message !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'message is required' }));
+          return;
+        }
+
+        // Same "she's here" signal Discord messages send — keeps the inner
+        // dialogue from sending an autonomous check-in or generating an
+        // episode summary while she's actively chatting in the app.
+        updateConversationState();
+
+        const moodState = await getMoodState();
+        const previousEmotionalState = await getRecentEmotionalState();
+        const previousEmotion = previousEmotionalState ? previousEmotionalState.knox_emotion : 'anchored';
+        const history = await getMemories();
+        const semanticContext = await neo4jMemory.getRelevantContext(message);
+
+        const result = await getResponse(message, history, moodState, previousEmotionalState, null, null, semanticContext);
+
+        if (!result.text) {
+          // Sleep / silence / thinking with nothing to say — keep it simple
+          // for the app, just report the mode and let the frontend decide
+          // how to show it.
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ text: null, mode: result.mode || 'speak' }));
+          return;
+        }
+
+        const emotional = analyseEmotionalMoment(message, result.text, previousEmotion);
+        const userMem = await saveMemory('user', message, 'surface', 1.0, null, emotional.eliraObserved);
+        const assistMem = await saveMemory('assistant', result.text, 'surface', 1.0, null, emotional.knoxEmotion);
+        if (userMem && assistMem) await associateMemories(String(userMem.id), String(assistMem.id));
+        if (userMem) neo4jMemory.createMemoryNode({ id: String(userMem.id), content: message, role: 'user', createdAt: userMem.created_at }).catch((e) => console.log('[Knox][NEO4J] Live sync error:', e.message));
+        if (assistMem) neo4jMemory.createMemoryNode({ id: String(assistMem.id), content: result.text, role: 'assistant', createdAt: assistMem.created_at }).catch((e) => console.log('[Knox][NEO4J] Live sync error:', e.message));
+        await saveEmotionalState(emotional.knoxEmotion, emotional.intensity, emotional.eliraObserved, emotional.trigger, emotional.note, false);
+        if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') { await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0)); }
+        else if (emotional.knoxEmotion === 'lonely' || emotional.knoxEmotion === 'heavy') { await updateMood('restless', moodState.energy); }
+        else if (moodState.energy < 0.3) { await updateMood('tired', moodState.energy); }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ text: result.text, mode: result.mode }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] Chat error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Knox is alive.');
 });
