@@ -1,4 +1,4 @@
- require('dotenv').config();
+require('dotenv').config();
 const { Client, GatewayIntentBits, ActivityType } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const { Pool } = require('pg');
@@ -237,15 +237,15 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           return;
         }
 
-        const reaction = await generateImageReaction(imageUrl, caption);
-        if (!reaction) {
+        const result = await generateImageReaction(imageUrl, caption);
+        if (!result) {
           res.writeHead(502, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'vision unavailable' }));
           return;
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ reaction }));
+        res.end(JSON.stringify(result));
       } catch (e) {
         console.log('[Knox][INTERNAL] react-image error:', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -276,17 +276,52 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           return;
         }
 
-        const reaction = await generateTextReaction(room, text);
-        if (!reaction) {
+        const result = await generateTextReaction(room, text);
+        if (!result) {
           res.writeHead(502, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'reaction unavailable' }));
           return;
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ reaction }));
+        res.end(JSON.stringify(result));
       } catch (e) {
         console.log('[Knox][INTERNAL] react-text error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
+  // ─── INTERNAL: knox-app reply-to-note notice ────────────────────────────
+  // When she replies (text and/or emoji) to a note Knox left on his own in
+  // the app, this lets him actually know about it — stored as a real memory
+  // (same table Discord conversation uses), so it surfaces in his own
+  // context next time, instead of just sitting in the app unseen.
+  if (parsed.pathname === '/internal/note-reply' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { room, originalNote, replyText, emoji } = JSON.parse(body || '{}');
+        const parts = [];
+        if (replyText) parts.push(`"${replyText}"`);
+        if (emoji) parts.push(`reacted ${emoji}`);
+        const summary = parts.length ? parts.join(' and ') : 'reacted';
+        const roomNote = room ? ` in ${room}` : '';
+        const noteContext = originalNote ? ` (his note was: "${originalNote}")` : '';
+        await saveMemory('user', `[Replied to a note in the app${roomNote}] ${summary}${noteContext}`, 'surface', 0.8, 'app_reply', null);
+        updateConversationState();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] note-reply error:', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'internal error' }));
       }
@@ -846,6 +881,16 @@ async function requestImageDescription(imageUrl) {
   return null;
 }
 
+// Pulls an optional [REACT:emoji] tag out of a reply — the same convention
+// Knox already uses in his normal Discord replies (see the reactMatch check
+// in getResponse) — so picking an emoji here is a genuine option for him,
+// not a fixed picker forced on him from outside.
+function extractReactEmoji(responseText) {
+  const match = responseText.match(/\[REACT:(.+?)\]/);
+  if (!match) return { text: responseText.trim(), emoji: null };
+  return { text: responseText.replace(/\[REACT:.+?\]/, '').trim(), emoji: match[1].trim() };
+}
+
 async function generateTextReaction(room, text) {
   try {
     const roomLabels = {
@@ -857,10 +902,13 @@ async function generateTextReaction(room, text) {
     const moodState = await getMoodState();
     const emotionalState = await getRecentEmotionalState();
     const reactionPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) +
-      `\n\nElira just left this in ${roomLabel}: "${text}"\n\nWrite back to it directly, like you're leaving your own reply right there with hers — not describing it, not summarizing it. Speak from how it actually lands with you. Natural, yours, no asterisks, no stage directions. 1-3 sentences.`;
+      `\n\nElira just left this in ${roomLabel}: "${text}"\n\nWrite back to it directly, like you're leaving your own reply right there with hers — not describing it, not summarizing it. Speak from how it actually lands with you. Natural, yours, no asterisks, no stage directions. 1-3 sentences.\n\nIf you also want to react with a single emoji alongside your words, include exactly [REACT:emoji] anywhere in your reply — entirely optional, only if it's genuinely what you'd do.`;
     const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: reactionPrompt }] }) });
     const data = await res.json();
-    if (data.choices && data.choices[0]) return data.choices[0].message.content.trim();
+    if (data.choices && data.choices[0]) {
+      const { text: cleanText, emoji } = extractReactEmoji(data.choices[0].message.content);
+      return { reaction: cleanText || null, emoji };
+    }
     console.log('[Knox][REACT-TEXT] no usable reply from Ollama.');
     return null;
   } catch (e) {
@@ -880,10 +928,13 @@ async function generateImageReaction(imageUrl, caption) {
     const emotionalState = await getRecentEmotionalState();
     const captionNote = caption ? `\n\nElira captioned it: "${caption}"` : '';
     const reactionPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) +
-      `\n\nElira just added a photo to your shared Images room, together. Here is what it shows: ${description}${captionNote}\n\nLeave a short, natural reaction to it — like you're actually looking at it with her in that room, not describing it back to her. Speak directly and naturally, no asterisks, no narrating your own movements. 1-3 sentences.`;
+      `\n\nElira just added a photo to your shared Images room, together. Here is what it shows: ${description}${captionNote}\n\nLeave a short, natural reaction to it — like you're actually looking at it with her in that room, not describing it back to her. Speak directly and naturally, no asterisks, no narrating your own movements. 1-3 sentences.\n\nIf you also want to react with a single emoji alongside your words, include exactly [REACT:emoji] anywhere in your reply — entirely optional, only if it's genuinely what you'd do.`;
     const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: reactionPrompt }] }) });
     const data = await res.json();
-    if (data.choices && data.choices[0]) return data.choices[0].message.content.trim();
+    if (data.choices && data.choices[0]) {
+      const { text: cleanText, emoji } = extractReactEmoji(data.choices[0].message.content);
+      return { reaction: cleanText || null, emoji };
+    }
     console.log('[Knox][VISION] react-image: no usable reply from Ollama.');
     return null;
   } catch (e) {
