@@ -329,6 +329,46 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // ─── INTERNAL: knox-app build request ───────────────────────────────────
+  // She's asking Knox to build something specific for the Build room — a
+  // small self-contained HTML/CSS/JS thing that runs in a locked-down,
+  // no-network sandbox in the app. Same shared-secret pattern as the other
+  // internal endpoints; the actual writing happens in generateBuildProject.
+  if (parsed.pathname === '/internal/build' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { prompt } = JSON.parse(body || '{}');
+        if (!prompt || typeof prompt !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'prompt is required' }));
+          return;
+        }
+
+        const project = await generateBuildProject(prompt);
+        if (!project) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'build unavailable' }));
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(project));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] build error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Knox is alive.');
 });
@@ -889,6 +929,31 @@ function extractReactEmoji(responseText) {
   const match = responseText.match(/\[REACT:(.+?)\]/);
   if (!match) return { text: responseText.trim(), emoji: null };
   return { text: responseText.replace(/\[REACT:.+?\]/, '').trim(), emoji: match[1].trim() };
+}
+
+async function generateBuildProject(prompt) {
+  try {
+    const moodState = await getMoodState();
+    const emotionalState = await getRecentEmotionalState();
+    const buildPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) +
+      `\n\nElira asked you to build something for the Build room in your shared app: "${prompt}"\n\nBuild a small, self-contained interactive thing — a mini game, a generative visual, an animated toy — entirely in HTML, CSS and vanilla JavaScript. It runs inside a locked-down sandbox with no network access at all, so: no external scripts, stylesheets, fonts or images, no fetch/XHR/websockets, nothing loaded from a URL — everything has to be self-contained in what you write. Keep it small enough to actually finish.\n\nRespond in exactly this format, nothing else:\nTITLE: <a short title, a few words>\nDESCRIPTION: <one sentence about what it is, in your own voice>\n---CODE---\n<the HTML/CSS/JS itself, ready to drop into a page body>`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: buildPrompt }] }) });
+    const data = await res.json();
+    if (!data.choices || !data.choices[0]) { console.log('[Knox][BUILD] no usable reply from Ollama.'); return null; }
+    const raw = data.choices[0].message.content;
+    const titleMatch = raw.match(/TITLE:\s*(.+)/i);
+    const descMatch = raw.match(/DESCRIPTION:\s*(.+)/i);
+    const codeMatch = raw.match(/---CODE---\s*([\s\S]+)/i);
+    if (!codeMatch) { console.log('[Knox][BUILD] response missing a code section.'); return null; }
+    return {
+      title: titleMatch ? titleMatch[1].trim() : 'Untitled',
+      description: descMatch ? descMatch[1].trim() : '',
+      code: codeMatch[1].trim(),
+    };
+  } catch (e) {
+    console.log('[Knox][BUILD] error:', e.message);
+    return null;
+  }
 }
 
 async function generateTextReaction(room, text) {
