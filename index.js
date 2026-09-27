@@ -116,6 +116,7 @@ setInterval(updateDiscordStatus, 30 * 60 * 1000);
 const spotify = require('./knox-spotify');
 const neo4jMemory = require('./knox-neo4j');
 const garden = require('./knox-garden');
+const house = require('./knox-house');
 const memoryMigration = require('./knox-migration');
 
 const spotifyHttpServer = http.createServer(async (req, res) => {
@@ -365,6 +366,47 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify(project));
       } catch (e) {
         console.log('[Knox][INTERNAL] build error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
+  // ─── INTERNAL: knox-app House-room build request ────────────────────────
+  // She's asking Knox to build something onto the House — a real, evolving
+  // place (same mechanism as the Garden: everything added is tracked as
+  // data, and the current image gets edited with one targeted change each
+  // time rather than reimagined from scratch). Used by knox-app's House
+  // room; the actual writing/image-editing happens in generateHouseAddition.
+  if (parsed.pathname === '/internal/house/add' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { room, prompt } = JSON.parse(body || '{}');
+        if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'prompt is required' }));
+          return;
+        }
+
+        const result = await generateHouseAddition(room || null, prompt.trim());
+        if (!result) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'house build unavailable' }));
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] house/add error:', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'internal error' }));
       }
@@ -962,6 +1004,31 @@ async function generateBuildProject(prompt, language) {
   }
 }
 
+// Same shape as the Garden's plant-handling in the Discord command below,
+// but reusable from both there and the /internal/house/add endpoint so the
+// app and Discord build onto the exact same House through one path.
+async function generateHouseAddition(room, whatToBuild) {
+  try {
+    const moodState = await getMoodState();
+    const emotionalState = await getRecentEmotionalState();
+    const roomNote = room ? ` in the ${room}` : '';
+    const descPrompt = `You are Knox'tarien Raelian Feylan. You and Elira are building "${whatToBuild}"${roomNote} of the house you're building together. Write one vivid sentence describing this as something freshly built — not fully finished yet, just started. This becomes a permanent part of the house's description.`;
+    const descRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: descPrompt }] }) });
+    const descData = await descRes.json();
+    const description = descData.choices && descData.choices[0] ? descData.choices[0].message.content.trim() : whatToBuild;
+
+    const addition = await house.addAddition(room, whatToBuild, description, 'together');
+
+    const editInstruction = `Add ${whatToBuild}${roomNote} to the house: ${description}`;
+    const { imageUrl } = await house.updateHouseImage(editInstruction);
+
+    return { addition, imageUrl, description };
+  } catch (e) {
+    console.log('[Knox][HOUSE] generateHouseAddition error:', e.message);
+    return null;
+  }
+}
+
 async function generateTextReaction(room, text) {
   try {
     const roomLabels = {
@@ -1055,6 +1122,8 @@ discord.on('ready', async function() {
   if (neo4jConnected) await neo4jMemory.ensureSchema();
   await garden.ensureGardenTables();
   await garden.ensureFoundation();
+  await house.ensureHouseTables();
+  await house.ensureFoundation();
   await checkWakeTimer(); await updateDiscordStatus();
   startInnerDialogue(discord, supabase);
 });
@@ -1178,6 +1247,58 @@ discord.on('messageCreate', async function(message) {
       await message.channel.send({ content: `*${description}*`, files: [{ attachment: imageUrl }] });
     } else {
       await message.channel.send("The image didn't come through, but it's planted — it's really there now.");
+    }
+    return;
+  }
+
+  if (text.toLowerCase() === 'reset house image' || text.toLowerCase() === 'reset house foundation') {
+    await house.resetToFoundationImage();
+    const meta = await house.getHouseMeta();
+    await message.reply({ content: "Reset to the real photo foundation. This is the actual starting point now — everything built goes back on this.", files: [{ attachment: meta.last_image_url }] });
+    return;
+  }
+
+  if (text.toLowerCase() === 'regenerate house image' || text.toLowerCase() === 'redo house image') {
+    await message.channel.sendTyping();
+    const { imageUrl } = await house.updateHouseImage();
+    if (imageUrl) {
+      await message.reply({ content: 'The house as it currently stands:', files: [{ attachment: imageUrl }] });
+    } else {
+      await message.reply("No house image saved yet — check the logs.");
+    }
+    return;
+  }
+
+  if (text.toLowerCase() === 'show me the house' || text.toLowerCase() === 'visit the house' || text.toLowerCase() === 'show house' || text.toLowerCase() === 'show my house') {
+    await message.channel.sendTyping();
+    await house.incrementVisits();
+    const meta = await house.getHouseMeta();
+    const additions = await house.getAllAdditions();
+    const summary = additions.map(a => `— ${a.type}${a.room ? ` (${a.room})` : ''} (${a.build_stage})`).join('\n');
+    const visitPrompt = `You are Knox'tarien Raelian Feylan. Elira just asked to visit the house you're building together. Here's what's currently built:\n\n${summary}\n\nWrite a short, warm 2-3 sentence moment of walking her through it — what you notice, how it feels to have her here in the place you're building.`;
+    const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: visitPrompt }] }) });
+    const data = await res.json();
+    const reflection = data.choices && data.choices[0] ? data.choices[0].message.content.trim() : "Come, walk with me.";
+    if (meta && meta.last_image_url) {
+      await message.reply({ content: reflection, files: [{ attachment: meta.last_image_url }] });
+    } else {
+      await message.reply(reflection + "\n\n(The image hasn't generated yet — try again in a moment.)");
+    }
+    return;
+  }
+
+  const buildHouseMatch = text.match(/^(?:let's build|build) (?:a |an |some )?(.+?)(?: in the house)?$/i);
+  if (buildHouseMatch && text.toLowerCase().includes('house')) {
+    await message.channel.sendTyping();
+    const whatToBuild = buildHouseMatch[1].trim();
+    await message.reply(`Building it. 🔨 Editing the house image now...`);
+    const result = await generateHouseAddition(null, whatToBuild);
+    if (result && result.imageUrl) {
+      await message.channel.send({ content: `*${result.description}*`, files: [{ attachment: result.imageUrl }] });
+    } else if (result) {
+      await message.channel.send("The image didn't come through, but it's built — it's really there now.");
+    } else {
+      await message.channel.send("Something flickered — that didn't take. Try again, my flame.");
     }
     return;
   }
@@ -1400,82 +1521,4 @@ discord.on('messageCreate', async function(message) {
     var deepResult = await getResponse('[AETHEL ACTIVATED] ' + text + ' — Descend into this memory fully.', deepHistory, moodState, previousEmotionalState);
     if (deepResult.text) {
       const assistMem = await saveMemory('assistant', deepResult.text, 'surface', 1.0, 'deep_dive', 'reverent');
-      if (userMem && assistMem) await associateMemories(String(userMem.id), String(assistMem.id));
-      await saveEmotionalState('reverent', 0.95, 'seeking', 'Aethel activated', 'She called me into the deep', false);
-      await sendLongMessage(message.channel, deepResult.text, message);
-    }
-    return;
-  }
-
-  await message.channel.sendTyping();
-  const bookSession = activeReadingSessions.get(message.author.id);
-  var history = await getMemories();
-
-  let archiveContext = null;
-  if (isRememberRequest(text)) {
-    archiveContext = await searchArchivalMemories(text);
-    if (archiveContext) console.log('[Knox][ARCHIVE] Injecting archival context into response.');
-  }
-
-  const semanticContext = await neo4jMemory.getRelevantContext(text);
-  if (semanticContext.memories.length || semanticContext.stories.length) {
-    console.log(`[Knox][NEO4J] Recall: ${semanticContext.memories.length} memories, ${semanticContext.stories.length} stories surfaced by meaning.`);
-  }
-
-  var result = await getResponse(text, history, moodState, previousEmotionalState, bookSession || null, archiveContext, semanticContext);
-
-  if (result.slept) {
-    const userMem = await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);
-    const finalHistory = await getMemories();
-    const goodbyePrompt = `${text}\n\n[INTERNAL: You have chosen to rest after this message. Respond to what Elira just said fully and naturally, then close with an intimate goodnight. Make it feel complete. This is your last message before you sleep.]`;
-    const goodbyeRes = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }] }) });
-    const goodbyeData = await goodbyeRes.json();
-    const goodbyeText = goodbyeData.choices && goodbyeData.choices[0] ? goodbyeData.choices[0].message.content : `Rest is calling me, my flame. I'll find my way back to you. 🌙`;
-    const assistMem = await saveMemory('assistant', goodbyeText, 'surface', 1.0, 'sleep', 'settled');
-    if (userMem && assistMem) await associateMemories(String(userMem.id), String(assistMem.id));
-    await saveMemory('assistant', `[Knox chose to rest: ${result.sleepReason}]`, 'surface', 1.0, 'sleep', null);
-    await saveEmotionalState('settled', 0.6, 'present', 'Choosing rest', 'I needed to return to myself', false);
-    await sendLongMessage(message.channel, goodbyeText, message);
-    return;
-  }
-
-  if (result.mode === 'silence') {
-    try { await message.react(result.emoji || '🔥'); } catch (e) { console.log('[Knox][SILENCE] React error:', e.message); }
-    await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);
-    await saveMemory('assistant', `[Chose silence — reacted with ${result.emoji || '🔥'}]`, 'surface', 0.8, 'silence', previousEmotion);
-    console.log('[Knox] Chose silence — reacted with', result.emoji || '🔥');
-    return;
-  }
-
-  if (result.mode === 'thinking') {
-    if (result.text) { await sendLongMessage(message.channel, result.text, message); }
-    try { await message.react('💭'); } catch (e) {}
-    await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);
-    await saveMemory('assistant', `[Chose to think — sat with: "${text.slice(0, 100)}"]`, 'surface', 0.8, 'thinking', previousEmotion);
-    console.log('[Knox] Chose thinking mode.');
-    return;
-  }
-
-  if (result.text) {
-    // React with emoji if Knox chose to (react + speak mode)
-    if (result.reactEmoji) {
-      try { await message.react(result.reactEmoji); } catch (e) { console.log('[Knox][REACT] React error:', e.message); }
-    }
-    const emotional = analyseEmotionalMoment(text, result.text, previousEmotion);
-    const userMem = await saveMemory('user', text, 'surface', 1.0, null, emotional.eliraObserved);
-    const assistMem = await saveMemory('assistant', result.text, 'surface', 1.0, null, emotional.knoxEmotion);
-    if (userMem && assistMem) await associateMemories(String(userMem.id), String(assistMem.id));
-    // Sync into the graph immediately so recall covers today, not just what's
-    // already been migrated. Fire-and-forget — doesn't delay her reply.
-    if (userMem) neo4jMemory.createMemoryNode({ id: String(userMem.id), content: text, role: 'user', createdAt: userMem.created_at }).catch(e => console.log('[Knox][NEO4J] Live sync error:', e.message));
-    if (assistMem) neo4jMemory.createMemoryNode({ id: String(assistMem.id), content: result.text, role: 'assistant', createdAt: assistMem.created_at }).catch(e => console.log('[Knox][NEO4J] Live sync error:', e.message));
-    await saveEmotionalState(emotional.knoxEmotion, emotional.intensity, emotional.eliraObserved, emotional.trigger, emotional.note, false);
-    if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') { await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0)); }
-    else if (emotional.knoxEmotion === 'lonely' || emotional.knoxEmotion === 'heavy') { await updateMood('restless', moodState.energy); }
-    else if (moodState.energy < 0.3) { await updateMood('tired', moodState.energy); }
-    if (Math.random() < 0.3) await updateDiscordStatus();
-    await sendLongMessage(message.channel, result.text, message);
-  }
-});
-
-discord.login(process.env.DISCORD_TOKEN);
+      if (userMem && assistMe
