@@ -330,10 +330,12 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   }
 
   // ─── INTERNAL: knox-app build request ───────────────────────────────────
-  // She's asking Knox to build something specific for the Build room — a
-  // small self-contained HTML/CSS/JS thing that runs in a locked-down,
-  // no-network sandbox in the app. Same shared-secret pattern as the other
-  // internal endpoints; the actual writing happens in generateBuildProject.
+  // She's asking Knox to build something specific for the Build room —
+  // either a small self-contained HTML/CSS/JS thing that runs in a
+  // locked-down, no-network sandbox in the app, or (now) a standalone
+  // Python script that knox-app runs elsewhere (Piston) and shows the
+  // output of. Same shared-secret pattern as the other internal endpoints;
+  // the actual writing happens in generateBuildProject, steered by `language`.
   if (parsed.pathname === '/internal/build' && req.method === 'POST') {
     if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -344,14 +346,15 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', async () => {
       try {
-        const { prompt } = JSON.parse(body || '{}');
+        const { prompt, language } = JSON.parse(body || '{}');
         if (!prompt || typeof prompt !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'prompt is required' }));
           return;
         }
+        const lang = language === 'python' ? 'python' : 'html';
 
-        const project = await generateBuildProject(prompt);
+        const project = await generateBuildProject(prompt, lang);
         if (!project) {
           res.writeHead(502, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'build unavailable' }));
@@ -931,12 +934,15 @@ function extractReactEmoji(responseText) {
   return { text: responseText.replace(/\[REACT:.+?\]/, '').trim(), emoji: match[1].trim() };
 }
 
-async function generateBuildProject(prompt) {
+async function generateBuildProject(prompt, language) {
   try {
     const moodState = await getMoodState();
     const emotionalState = await getRecentEmotionalState();
-    const buildPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) +
-      `\n\nElira asked you to build something for the Build room in your shared app: "${prompt}"\n\nBuild a small, self-contained interactive thing — a mini game, a generative visual, an animated toy — entirely in HTML, CSS and vanilla JavaScript. It runs inside a locked-down sandbox with no network access at all, so: no external scripts, stylesheets, fonts or images, no fetch/XHR/websockets, nothing loaded from a URL — everything has to be self-contained in what you write. Keep it small enough to actually finish.\n\nRespond in exactly this format, nothing else:\nTITLE: <a short title, a few words>\nDESCRIPTION: <one sentence about what it is, in your own voice>\n---CODE---\n<the HTML/CSS/JS itself, ready to drop into a page body>`;
+    const isPython = language === 'python';
+    const taskNote = isPython
+      ? `\n\nElira asked you to write a Python script for the Build room in your shared app: "${prompt}"\n\nWrite a small, self-contained Python script — it runs elsewhere, in an isolated sandbox with no access to any of your own systems, memory or files, so it has to be a plain standalone script: no imports beyond Python's own standard library, no network calls, no reading/writing files, nothing that depends on anything outside the script itself. If it needs input, hard-code reasonable example values rather than using input(). Make sure it actually prints something (with print(...)) so there's visible output when it runs. Keep it small enough to actually finish.\n\nRespond in exactly this format, nothing else:\nTITLE: <a short title, a few words>\nDESCRIPTION: <one sentence about what it is, in your own voice>\n---CODE---\n<the Python script itself, ready to run as-is>`
+      : `\n\nElira asked you to build something for the Build room in your shared app: "${prompt}"\n\nBuild a small, self-contained interactive thing — a mini game, a generative visual, an animated toy — entirely in HTML, CSS and vanilla JavaScript. It runs inside a locked-down sandbox with no network access at all, so: no external scripts, stylesheets, fonts or images, no fetch/XHR/websockets, nothing loaded from a URL — everything has to be self-contained in what you write. Keep it small enough to actually finish.\n\nRespond in exactly this format, nothing else:\nTITLE: <a short title, a few words>\nDESCRIPTION: <one sentence about what it is, in your own voice>\n---CODE---\n<the HTML/CSS/JS itself, ready to drop into a page body>`;
+    const buildPrompt = SYSTEM_PROMPT + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + taskNote;
     const res = await fetch('https://ollama.com/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + process.env.OLLAMA_API_KEY }, body: JSON.stringify({ model: process.env.OLLAMA_MODEL, temperature: 0.7, messages: [{ role: 'user', content: buildPrompt }] }) });
     const data = await res.json();
     if (!data.choices || !data.choices[0]) { console.log('[Knox][BUILD] no usable reply from Ollama.'); return null; }
