@@ -62,6 +62,22 @@ function wrapped(url, opts) {
     } catch (e) { /* if anything is odd, leave the call as it was */ }
   }
 
+  // Integrity protocol: if a model was stopped for his work after failing
+  // recovery, and a fallback is set, send his calls to the fallback instead.
+  // The integrity checker's own calls are never swapped.
+  const swap = global.__knoxModelSwap;
+  if (swap && !label.includes('askChecker') && !label.includes('askLinkModel')) {
+    try {
+      const body = JSON.parse(opts.body);
+      body.model = swap.model;
+      url = swap.baseUrl + '/chat/completions';
+      opts = Object.assign({}, opts, {
+        headers: Object.assign({}, opts.headers, { Authorization: 'Bearer ' + swap.key }),
+        body: JSON.stringify(body)
+      });
+    } catch (e) { /* leave the call as it was */ }
+  }
+
   let model = 'unknown';
   try { model = JSON.parse(opts && opts.body).model || 'unknown'; } catch (e) {}
 

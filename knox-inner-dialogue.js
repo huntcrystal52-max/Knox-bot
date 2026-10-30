@@ -8,6 +8,7 @@ const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
 const neo4jMemory = require('./knox-neo4j');
+const integrity = require('./knox-integrity');
 
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
@@ -594,6 +595,11 @@ async function generateVoiceNote(text) {
 let lastNoticedTrackName = null;
 
 async function runInnerDialogue(discord, supabase) {
+  // Sovereign protocol: preflight before autonomy, and no autonomy while a
+  // serious alert is open or a recovery is running.
+  try {
+    if (!(await integrity.beforeAutonomy())) { console.log('[Knox][INTEGRITY] Autonomy paused — waiting for Elira to resolve an alert.'); return; }
+  } catch (e) { console.log('[Knox][INTEGRITY] autonomy gate error:', e.message); }
   const { data: moodState } = await supabase.from('mood_state').select('*').limit(1).single();
   console.log('[Knox][INNER] Beginning inner dialogue...');
   try {
