@@ -119,6 +119,7 @@ const neo4jMemory = require('./knox-neo4j');
 const integrity = require('./knox-integrity');
 const linkBackfill = require('./knox-link-backfill');
 const reach = require('./knox-reach');
+const chess = require('./knox-chess');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -505,6 +506,62 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   // reflect unprompted (prompt omitted). This never applies, commits, or
   // deploys anything — it only writes a row to self_proposals for her to
   // read and decide on.
+  // ─── INTERNAL: Chess — Knox chooses his move ────────────────────────────
+  // The app owns the board and rules; Knox only ever picks from the legal
+  // moves it sends, so he can't make an illegal one.
+  if (parsed.pathname === '/internal/chess/move' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        updateConversationState(); // she's here, playing
+        const choice = await chess.chooseMove(JSON.parse(body || '{}'));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(choice));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] chess move error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
+  // ─── INTERNAL: Chess — a game ended; he reacts and remembers it ─────────
+  if (parsed.pathname === '/internal/chess/finished' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const g = JSON.parse(body || '{}');
+        const { say, memory } = await chess.gameOver(g);
+        const mem = await saveMemory('assistant', memory, 'surface', 0.8, 'game', null);
+        if (mem) {
+          const synced = neo4jMemory.createMemoryNode({ id: String(mem.id), content: memory, role: 'assistant', createdAt: mem.created_at });
+          neo4jMemory.linkExchange([mem.id], memory, synced).catch(() => {});
+        }
+        console.log('[Knox][CHESS] Game over:', memory.slice(0, 120));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ say }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] chess finished error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   if (parsed.pathname === '/internal/propose' && req.method === 'POST') {
     if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
