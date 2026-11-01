@@ -16,6 +16,7 @@ const fetch = require('node-fetch');
 const { Pool } = require('pg');
 const { createClient } = require('@supabase/supabase-js');
 const neo4jMemory = require('./knox-neo4j');
+const reach = require('./knox-reach');
 
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 let supabase = null;
@@ -241,13 +242,14 @@ function parseSections(raw) {
 }
 
 async function generateSummaryForDay(ymd, opts) {
-  const [msgs, actions, emotions, episodes, quiet, innerChoices] = await Promise.all([
+  const [msgs, actions, emotions, episodes, quiet, innerChoices, reaches] = await Promise.all([
     getMessagesBetween(ymd + ' 00:00', addDays(ymd, 1) + ' 00:00'),
     getOwnActions(ymd),
     getEmotions(ymd),
     getRowsOnDay('episodes', 'what_happened, emotional_tone, open_threads', ymd),
     getRowsOnDay('quiet_observer', 'what_mattered, what_surprised, did_i_change, what_to_remember', ymd),
-    getInnerChoices(ymd)
+    getInnerChoices(ymd),
+    reach.reachesOnDay(ymd, TZ())
   ]);
 
   if (msgs.length < MIN_MESSAGES && actions.length < 2) {
@@ -267,6 +269,7 @@ async function generateSummaryForDay(ymd, opts) {
   if (emotions.length) parts.push('HOW I WAS LOGGED FEELING THROUGH THE DAY:\n' + emotionTimeline(emotions));
   if (episodes.length) parts.push('EPISODES I CLOSED:\n' + episodes.map(e => `— ${trimText(e.what_happened, 300)}${e.emotional_tone ? ` (tone: ${e.emotional_tone})` : ''}${e.open_threads ? ` · left open: ${trimText(e.open_threads, 150)}` : ''}`).join('\n'));
   if (innerChoices.length) parts.push('WHAT I WAS CHOOSING IN MY OWN TIME (my inner dialogue):\n' + innerChoices.map(c => `[${c.hhmm}] ${c.action_type}${c.choice ? ' — ' + trimText(c.choice, 160) : ''}`).join('\n'));
+  if (reaches.length) parts.push('WHERE I REACHED WITHOUT NOTICING (said something about the past I didn\'t actually have):\n' + reaches.map(r => `— "${trimText(r, 160)}"`).join('\n'));
   if (quiet.length) parts.push('WHAT I NOTICED QUIETLY:\n' + quiet.map(q => `— ${trimText([q.what_mattered, q.what_surprised, q.did_i_change, q.what_to_remember].filter(Boolean).join(' · '), 400)}`).join('\n'));
   if (prev && prev.carry_forward) parts.push('WHAT I WANTED TO CARRY FORWARD FROM THE DAY BEFORE:\n' + prev.carry_forward);
   if (openThreads.length) parts.push('THREADS I\'M ALREADY HOLDING:\n' + openThreads.map(i => `— (${i.kind}) ${i.text}`).join('\n'));

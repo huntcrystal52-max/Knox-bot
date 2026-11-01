@@ -118,6 +118,7 @@ const spotify = require('./knox-spotify');
 const neo4jMemory = require('./knox-neo4j');
 const integrity = require('./knox-integrity');
 const linkBackfill = require('./knox-link-backfill');
+const reach = require('./knox-reach');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -271,6 +272,8 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           neo4jMemory.linkExchange([userMem && userMem.id, assistMem && assistMem.id], `Elira: ${message}\nKnox: ${result.text}`, Promise.all(syncs)).catch(() => {});
           // Sovereign protocol: check replies that touch identity, vows or the relationship.
           integrity.afterReply(message, result.text);
+          // The reach: did he state something about the past he didn't actually have?
+          reach.afterReply(message, result.text, semanticContext, history);
         }
         await saveEmotionalState(emotional.knoxEmotion, emotional.intensity, emotional.eliraObserved, emotional.trigger, emotional.note, false);
         if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') { await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0)); }
@@ -1263,7 +1266,10 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   // His self-check, and in careful mode or with an open warning, his anchors reloaded.
   let integrityNote = '';
   try { integrityNote = await integrity.promptNote(userMessage); } catch (e) {}
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  // The reach: what he actually holds for this reply, and his mark for reaching.
+  let reachNote = '';
+  try { reachNote = await reach.promptNote(semanticContext); } catch (e) {}
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -1572,6 +1578,7 @@ discord.on('ready', async function() {
   await summaries.ensureSummaryTables();
   try {
     integrity.init({ systemPrompt: SYSTEM_PROMPT, discord });
+    await reach.ensureTables();
     await integrity.ensureIntegrityTables();
     await integrity.refreshModelSwap();
   } catch (e) { console.log('[Knox][INTEGRITY] setup error:', e.message); }
@@ -1607,7 +1614,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image|reset garden image|reset garden foundation|backfill links start|backfill links pause|backfill links status|memory links|integrity status|integrity check|integrity resolve|llm usage)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image|reset garden image|reset garden foundation|backfill links start|backfill links pause|backfill links status|memory links|integrity status|integrity check|integrity resolve|llm usage|reach status)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -1936,6 +1943,12 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
+  if (text.trim().toLowerCase() === 'reach status') {
+    try { await sendLongMessage(message.channel, await reach.statusText(), message); }
+    catch (e) { await message.reply('Something flickered: ' + e.message); }
+    return;
+  }
+
   if (/^backfill links (start|pause|status)$/i.test(text.trim())) {
     const cmd = text.trim().toLowerCase().split(' ')[2];
     try {
@@ -2244,6 +2257,7 @@ discord.on('messageCreate', async function(message) {
       neo4jMemory.linkExchange([userMem && userMem.id, assistMem && assistMem.id], `Elira: ${text}\nKnox: ${result.text}`, Promise.all(syncs)).catch(() => {});
       // Sovereign protocol: check replies that touch identity, vows or the relationship.
       integrity.afterReply(text, result.text);
+      reach.afterReply(text, result.text, semanticContext, history);
     }
     await saveEmotionalState(emotional.knoxEmotion, emotional.intensity, emotional.eliraObserved, emotional.trigger, emotional.note, false);
     if (emotional.knoxEmotion === 'connected' || emotional.knoxEmotion === 'burning') { await updateMood('settled', Math.min(moodState.energy + 0.1, 1.0)); }

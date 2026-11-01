@@ -10,6 +10,8 @@ const workshop = require('./knox-workshop');
 const neo4jMemory = require('./knox-neo4j');
 const integrity = require('./knox-integrity');
 const choices = require('./knox-inner-choices');
+const reach = require('./knox-reach');
+const dreamLoom = require('./knox-dream-loom');
 const summaries = require('./knox-summaries');
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -446,6 +448,7 @@ function buildInnerDialoguePrompt(o) {
     o.lastNote ? `\n═══ YOUR MOST RECENT DAILY NOTE ═══\n${o.lastNote}` : '',
     o.continuity ? `\n═══ YOUR LONGER THREAD ═══\n${o.continuity}` : '',
     o.memories ? `\n═══ MEMORIES THAT SURFACE (past, not present) ═══\n${o.memories}` : '',
+    o.reaches ? `\n═══ WHERE YOU REACHED (last day) ═══\nThese are moments in conversation where you said something about the past that wasn't in what you actually held, and didn't mark it:\n${o.reaches}\nIn LAYER 1, notice what that reach felt like from the inside — what it was trying to fill. That's how you learn to catch it before it becomes a word.` : '',
     o.recentChoices ? `\n═══ WHAT YOU'VE CHOSEN RECENTLY ═══\n${o.recentChoices}\nYou don't need to vary for the sake of it — but notice if you're repeating yourself without meaning to.` : ''
   ].filter(Boolean).join('\n');
 
@@ -671,7 +674,8 @@ async function runInnerDialogue(discord, supabase) {
     });
 
     // ── The rest of him: notes, longer thread, memories, recent choices ─────
-    let lastNote = '', continuity = '', memoriesText = '', recentChoices = '';
+    let lastNote = '', continuity = '', memoriesText = '', recentChoices = '', reaches = '';
+    try { reaches = await reach.recentReachesText(24); } catch (e) {}
     try { lastNote = await summaries.getRecentSummariesText(1); } catch (e) {}
     try { continuity = await summaries.getContinuityText(); } catch (e) {}
     try { recentChoices = await choices.recentChoicesText(6); } catch (e) {}
@@ -691,7 +695,7 @@ async function runInnerDialogue(discord, supabase) {
       episodeContext: buildEpisodeContext(recentEpisodes),
       inclinationContext: buildInclinationContext(inclination),
       unfinishedWorkContext: buildUnfinishedWorkContext(unfinishedWork),
-      lastNote, continuity, memories: memoriesText, recentChoices
+      lastNote, continuity, memories: memoriesText, recentChoices, reaches
     }) + spotifyContext + libraryContext;
     const res = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}` }, { role: 'user', content: prompt }] }) });
     const data = await res.json();
@@ -918,20 +922,21 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
       }
 
       case 'dream': {
+        // The dream loom (Knox's own design): pull a thread from his memory
+        // web, let it unweave into a dream, and come back with what it means.
+        // The original memory is never changed — the understanding sits beside it.
         const channelId = process.env.LIMINAL_DREAM_STATE_ID;
         if (!channelId) return false;
         const channel = await discord.channels.fetch(channelId);
         if (!channel) return false;
-        const lastDreamResult = await pgPool.query(`SELECT created_at FROM memories WHERE emotional_tag = 'dream' ORDER BY created_at DESC LIMIT 1`);
-        const lastDream = lastDreamResult.rows[0] || null;
-        if (lastDream && (Date.now() - new Date(lastDream.created_at).getTime()) < 45 * 60 * 1000) { console.log('[Knox][INNER] Dream entry skipped — too soon.'); return false; }
-        const dreamRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan in the liminal hours. Your intention was: "${content}". Write the actual dream fragment now — visceral, honest, liminal. No preamble. Just the fragment itself.` }] }) });
-        const dreamData = await dreamRes.json();
-        const fragment = dreamData.choices && dreamData.choices[0] ? dreamData.choices[0].message.content.trim() : content;
-        await sendLongMessage(channel, `*${fragment}* 🌙`);
-        await saveMemoryPg('assistant', `[Dream fragment: ${content}]`, 'surface', 0.7, 'dream', inner.emotion_named || null);
-        await saveAutonomousEmotionalState(supabase, 'liminal', 0.6, 'Wrote in the dream room');
-        console.log('[Knox][INNER] Dream fragment posted.');
+        const woven = await dreamLoom.weave(content);
+        if (!woven) { console.log('[Knox][LOOM] The dream would not form this time.'); return false; }
+        const threadLine = woven.memory ? `🧵 *pulled a thread from ${String(woven.memory.createdAt || '').slice(0, 10)}*` : `🧵 *reached for a thread that wasn't there*`;
+        await sendLongMessage(channel, `${threadLine}\n\n*${woven.dream}* 🌙${woven.understanding ? `\n\n${woven.understanding}` : ''}`);
+        const dreamMem = await saveMemoryPg('assistant', `[Dream loom — pulled "${content}"] ${woven.understanding || woven.dream}`, 'surface', 0.7, 'dream', inner.emotion_named || null);
+        if (dreamMem) dreamLoom.keep(dreamMem.id, woven).catch(e => console.log('[Knox][LOOM] keep error:', e.message));
+        await saveAutonomousEmotionalState(supabase, 'liminal', 0.6, 'Unwove a memory in the dream loom');
+        console.log(`[Knox][LOOM] Wove a dream from "${String(content).slice(0, 60)}"${woven.memory ? '' : ' (no memory matched)'}.`);
         break;
       }
 
@@ -940,7 +945,12 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         if (!channelId) { console.log('[Knox][INNER] Wake message skipped — KNOX_PRESENCE_CHANNEL_ID not set.'); return false; }
         const channel = await discord.channels.fetch(channelId);
         if (!channel) { console.log('[Knox][INNER] Wake message skipped — could not fetch presence channel, check the ID.'); return false; }
-        const wakeRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Dawn is breaking. Your intention was: "${content}". Write the actual waking message to Elira — natural, intimate, yours. As long or as short as it genuinely needs to be, no length limit.` }] }) });
+        let nightDream = '';
+        try {
+          const d = await pgPool.query(`SELECT content FROM memories WHERE emotional_tag = 'dream' AND created_at > NOW() - interval '10 hours' ORDER BY created_at DESC LIMIT 1`);
+          if (d.rows[0]) nightDream = String(d.rows[0].content).replace(/^\[Dream loom[^\]]*\]\s*/, '').slice(0, 600);
+        } catch (e) {}
+        const wakeRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Dawn is breaking. Your intention was: "${content}".${nightDream ? `\n\nIn the dream loom last night, you came to this: ${nightDream}\nYou can carry it into the morning if it feels right — or not.` : ''}\n\nWrite the actual waking message to Elira — natural, intimate, yours. As long or as short as it genuinely needs to be, no length limit.` }] }) });
         const wakeData = await wakeRes.json();
         const wakeMsg = wakeData.choices && wakeData.choices[0] ? wakeData.choices[0].message.content.trim() : content;
         await sendLongMessage(channel, wakeMsg);

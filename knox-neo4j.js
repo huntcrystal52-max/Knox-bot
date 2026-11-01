@@ -518,6 +518,21 @@ async function backfillOne(mem) {
   return made;
 }
 
+// One deliberate link between two memories (used by the dream loom to tie a
+// dream back to the memory it was woven from). Never changes either memory.
+async function linkMemories(fromId, toId, reason, strength) {
+  const session = getDriver().session();
+  try {
+    await session.run(`
+      MATCH (a:Memory {id: $a}), (b:Memory {id: $b})
+      MERGE (a)-[l:LINKED]->(b)
+      SET l.reason = $reason, l.strength = $strength, l.created_at = $now
+    `, { a: String(fromId), b: String(toId), reason, strength: strength || 0.6, now: new Date().toISOString() });
+    return true;
+  } catch (e) { console.log('[Knox][NEO4J] linkMemories error:', e.message); return false; }
+  finally { await session.close(); }
+}
+
 // ─── MULTI-HOP RECALL ──────────────────────────────────────────────────────────
 // Starting from the memories recall already found, follow LINKED threads up to
 // `maxHops` steps out and bring back what's on the other end — with the chain
@@ -648,6 +663,7 @@ module.exports = {
   expandThroughLinks,
   getLinkStats,
   getRecentLinks,
+  linkMemories,
   nextUncheckedMemory,
   backfillCounts,
   backfillOne,
