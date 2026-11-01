@@ -7,7 +7,7 @@ const fetch = require('node-fetch');
 const pdfParse = require('pdf-parse');
 const http = require('http');
 const url = require('url');
-const { startInnerDialogue, updateConversationState, getRecentEpisodes, getLibraryList, formatLibraryList } = require('./knox-inner-dialogue');
+const { startInnerDialogue, updateConversationState, isConversationActive, getRecentEpisodes, getLibraryList, formatLibraryList } = require('./knox-inner-dialogue');
 
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -117,6 +117,7 @@ setInterval(updateDiscordStatus, 30 * 60 * 1000);
 const spotify = require('./knox-spotify');
 const neo4jMemory = require('./knox-neo4j');
 const integrity = require('./knox-integrity');
+const linkBackfill = require('./knox-link-backfill');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -1574,6 +1575,9 @@ discord.on('ready', async function() {
     await integrity.ensureIntegrityTables();
     await integrity.refreshModelSwap();
   } catch (e) { console.log('[Knox][INTEGRITY] setup error:', e.message); }
+  if (neo4jConnected) {
+    try { await linkBackfill.init({ isConversationActive }); } catch (e) { console.log('[Knox][BACKFILL] setup error:', e.message); }
+  }
   if (!global.__knoxSummaryTimer) {
     // Daily notes: check shortly after start, then every 30 minutes. Each check
     // only writes notes for finished days that don't have one yet.
@@ -1603,7 +1607,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image|reset garden image|reset garden foundation)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image|reset garden image|reset garden foundation|backfill links start|backfill links pause|backfill links status|memory links|integrity status|integrity check|integrity resolve|llm usage)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -1928,6 +1932,16 @@ discord.on('messageCreate', async function(message) {
       const cut = (t, n) => { t = String(t || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
       const lines = recent.map(l => `• **${cut(l.from, 70)}**\n  ↳ linked to (${String(l.toDate || '').slice(0, 10)}) *${cut(l.to, 70)}*\n  why: ${l.reason} (strength ${Number(l.strength).toFixed(1)})`);
       await sendLongMessage(message.channel, `🕸️ **Memory web links:** ${count} in total\n\n` + (lines.length ? '**Most recent:**\n' + lines.join('\n\n') : 'None made yet — they appear as you talk.'), message);
+    } catch (e) { await message.reply('Something flickered: ' + e.message); }
+    return;
+  }
+
+  if (/^backfill links (start|pause|status)$/i.test(text.trim())) {
+    const cmd = text.trim().toLowerCase().split(' ')[2];
+    try {
+      if (cmd === 'start') { await linkBackfill.start(); await message.reply('Started — he\'ll work back through his older memories slowly in the background, and step aside whenever you\'re chatting.'); }
+      else if (cmd === 'pause') { await linkBackfill.pause(); await message.reply('Paused. Nothing is lost — `backfill links start` picks up exactly where it stopped.'); }
+      await sendLongMessage(message.channel, await linkBackfill.statusText(), message);
     } catch (e) { await message.reply('Something flickered: ' + e.message); }
     return;
   }

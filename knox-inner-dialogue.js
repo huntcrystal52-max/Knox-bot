@@ -1335,4 +1335,4 @@ function startInnerDialogue(discord, supabase) {
   }, 2 * 60 * 1000);
 }
 
-module.exports = { startInnerDialogue, updateConversationState, getRecentEpisodes, getLibraryList, formatLibraryList };
+module.exports = { startInnerDialogue, updateConversationState, isConversationActive, getRecentEpisodes, getLibraryList, formatLibraryList };

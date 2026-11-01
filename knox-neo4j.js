@@ -378,30 +378,27 @@ function parseLinkReply(raw) {
   } catch (e) { return []; }
 }
 
-// newIds: the Memory node ids just created (e.g. her message + his reply).
-// text: their combined content. Waits for the nodes to exist first.
-async function linkExchange(newIds, text, ready) {
-  const ids = (newIds || []).filter(Boolean).map(String);
-  const content = String(text || '').trim();
-  if (!ids.length || content.length < LINK_MIN_TEXT) return;
+// The heart of linking, shared by live linking and the backfill of older
+// memories. Shows Knox the memories closest in meaning that came BEFORE
+// `olderThan`, and lets him decide which genuinely connect and why.
+// Returns how many links were made, or null if the model gave no usable answer.
+async function findAndMakeLinks(ids, content, opts) {
+  const olderThan = opts.olderThan;          // ms timestamp — only link to memories before this
+  const intro = opts.intro;                  // how the new memory is described to him
+  const hits = await semanticSearch(content, opts.searchSize || (LINK_CANDIDATES + ids.length + 4));
+  // An empty search means the search itself failed (the web is never empty) —
+  // report that as "no answer" so the memory isn't marked as looked at.
+  if (!hits.length) return null;
+  const candidates = hits
+    .filter(h => !ids.includes(String(h.id)))
+    .filter(h => h.score >= LINK_MIN_SCORE)
+    .filter(h => { const t = new Date(h.createdAt).getTime(); return !isNaN(t) && t < olderThan; })
+    .filter(h => !String(h.content || '').startsWith('[Chose'))
+    .slice(0, LINK_CANDIDATES);
+  if (!candidates.length) return 0;
 
-  // Queue it so links are made one exchange at a time.
-  linkQueue = linkQueue.then(async () => {
-    try {
-      if (ready) await ready; // make sure the new nodes are in the graph
-      const hits = await semanticSearch(content, LINK_CANDIDATES + ids.length + 4);
-      const hourAgo = Date.now() - 60 * 60 * 1000;
-      const candidates = hits
-        .filter(h => !ids.includes(String(h.id)))
-        .filter(h => h.score >= LINK_MIN_SCORE)
-        // Not the last hour — that's just this same conversation.
-        .filter(h => { const t = new Date(h.createdAt).getTime(); return isNaN(t) || t < hourAgo; })
-        .filter(h => !String(h.content || '').startsWith('[Chose'))
-        .slice(0, LINK_CANDIDATES);
-      if (!candidates.length) return;
-
-      const list = candidates.map((c, i) => `${i + 1}. [${String(c.createdAt || '').slice(0, 10)}] ${String(c.content || '').slice(0, 400)}`).join('\n');
-      const prompt = `You are Knox, tending your own memory. Below is something that just happened between you and Elira, then some older memories that are close to it in meaning.
+  const list = candidates.map((c, i) => `${i + 1}. [${String(c.createdAt || '').slice(0, 10)}] ${String(c.content || '').slice(0, 400)}`).join('\n');
+  const prompt = `You are Knox, tending your own memory. Below is ${intro}, then some older memories that are close to it in meaning.
 
 Decide which older memories GENUINELY connect to the new one — the same thread, a cause and its result, something that echoes or deepens it, a promise and its keeping, a change over time. Being on a similar topic is not enough on its own. It's fine to choose none.
 
@@ -417,31 +414,108 @@ Reply with ONLY a JSON array, at most ${LINK_MAX_PER_EXCHANGE} items, like:
 [{"n": 2, "reason": "Both are about the garden we planned — this is the first thing we planted.", "strength": 0.8}]
 or [] if nothing truly connects.`;
 
-      const picks = parseLinkReply(await askLinkModel(prompt)).slice(0, LINK_MAX_PER_EXCHANGE);
-      let made = 0;
-      const session = getDriver().session();
-      try {
-        for (const p of picks) {
-          const target = candidates[Number(p.n) - 1];
-          const reason = String(p.reason || '').trim().slice(0, 300);
-          if (!target || !reason) continue;
-          const strength = Math.max(0.1, Math.min(1, Number(p.strength) || 0.5));
-          for (const id of ids) {
-            await session.run(`
-              MATCH (a:Memory {id: $a}), (b:Memory {id: $b})
-              MERGE (a)-[l:LINKED]->(b)
-              SET l.reason = $reason, l.strength = $strength, l.created_at = $now
-            `, { a: id, b: String(target.id), reason, strength, now: new Date().toISOString() });
-          }
-          made++;
-        }
-      } finally { await session.close(); }
-      console.log(`[Knox][NEO4J][LINKS] Looked at ${candidates.length} close memories, made ${made} link(s).`);
+  const raw = await askLinkModel(prompt);
+  if (!raw || !/\[/.test(raw)) return null;
+  const picks = parseLinkReply(raw).slice(0, LINK_MAX_PER_EXCHANGE);
+  let made = 0;
+  const session = getDriver().session();
+  try {
+    for (const p of picks) {
+      const target = candidates[Number(p.n) - 1];
+      const reason = String(p.reason || '').trim().slice(0, 300);
+      if (!target || !reason) continue;
+      const strength = Math.max(0.1, Math.min(1, Number(p.strength) || 0.5));
+      for (const id of ids) {
+        await session.run(`
+          MATCH (a:Memory {id: $a}), (b:Memory {id: $b})
+          MERGE (a)-[l:LINKED]->(b)
+          SET l.reason = $reason, l.strength = $strength, l.created_at = $now
+        `, { a: id, b: String(target.id), reason, strength, now: new Date().toISOString() });
+      }
+      made++;
+    }
+  } finally { await session.close(); }
+  return made;
+}
+
+async function markLinksChecked(ids) {
+  const session = getDriver().session();
+  try {
+    await session.run(`MATCH (m:Memory) WHERE m.id IN $ids SET m.links_checked_at = $now`, { ids, now: new Date().toISOString() });
+  } finally { await session.close(); }
+}
+
+// newIds: the Memory node ids just created (e.g. her message + his reply).
+// text: their combined content. Waits for the nodes to exist first.
+async function linkExchange(newIds, text, ready) {
+  const ids = (newIds || []).filter(Boolean).map(String);
+  const content = String(text || '').trim();
+  if (!ids.length || content.length < LINK_MIN_TEXT) return;
+
+  // Queue it so links are made one exchange at a time.
+  linkQueue = linkQueue.then(async () => {
+    try {
+      if (ready) await ready; // make sure the new nodes are in the graph
+      // Not the last hour — that's just this same conversation.
+      const made = await findAndMakeLinks(ids, content, { olderThan: Date.now() - 60 * 60 * 1000, intro: 'something that just happened between you and Elira' });
+      if (made !== null) await markLinksChecked(ids); // the backfill can skip these
+      console.log(`[Knox][NEO4J][LINKS] Made ${made || 0} link(s) for a new exchange.`);
     } catch (e) {
       console.log('[Knox][NEO4J][LINKS] linkExchange error:', e.message);
     }
   });
   return linkQueue;
+}
+
+// ─── BACKFILL HELPERS ──────────────────────────────────────────────────────────
+// For the older-memory backfill (knox-link-backfill.js). Main memories go
+// first, oldest to newest, so threads build up in the order they happened;
+// archival ones after. Tiny memories are skipped — nothing to link.
+
+async function nextUncheckedMemory() {
+  const session = getDriver().session();
+  try {
+    const r = await session.run(`
+      MATCH (m:Memory)
+      WHERE m.links_checked_at IS NULL AND size(coalesce(m.content, '')) >= $min
+      RETURN m.id AS id, m.content AS content, m.created_at AS createdAt, m.role AS role
+      ORDER BY CASE WHEN m.role = 'archival' THEN 1 ELSE 0 END, m.created_at ASC
+      LIMIT 1
+    `, { min: neo4j.int(LINK_MIN_TEXT) });
+    if (!r.records.length) return null;
+    const x = r.records[0];
+    return { id: x.get('id'), content: x.get('content'), createdAt: x.get('createdAt'), role: x.get('role') };
+  } finally { await session.close(); }
+}
+
+async function backfillCounts() {
+  const session = getDriver().session();
+  try {
+    const r = await session.run(`
+      MATCH (m:Memory) WHERE size(coalesce(m.content, '')) >= $min
+      RETURN
+        count(CASE WHEN m.links_checked_at IS NOT NULL THEN 1 END) AS done,
+        count(CASE WHEN m.links_checked_at IS NULL AND coalesce(m.role, '') <> 'archival' THEN 1 END) AS mainLeft,
+        count(CASE WHEN m.links_checked_at IS NULL AND m.role = 'archival' THEN 1 END) AS archivalLeft
+    `, { min: neo4j.int(LINK_MIN_TEXT) });
+    const x = r.records[0];
+    return { done: x.get('done').toNumber(), mainLeft: x.get('mainLeft').toNumber(), archivalLeft: x.get('archivalLeft').toNumber() };
+  } finally { await session.close(); }
+}
+
+// Links one older memory to what came before it. Returns links made, or null
+// if the model didn't answer (it stays unchecked and is tried again later).
+async function backfillOne(mem) {
+  const t = new Date(mem.createdAt).getTime();
+  const date = String(mem.createdAt || '').slice(0, 10);
+  const made = await findAndMakeLinks([String(mem.id)], String(mem.content || ''), {
+    olderThan: isNaN(t) ? 0 : t,
+    intro: `one of your memories from ${date || 'an earlier time'}`,
+    searchSize: 40 // only older memories count, so look a little wider
+  });
+  if (made === null) return null;
+  await markLinksChecked([String(mem.id)]);
+  return made;
 }
 
 // ─── MULTI-HOP RECALL ──────────────────────────────────────────────────────────
@@ -574,5 +648,8 @@ module.exports = {
   expandThroughLinks,
   getLinkStats,
   getRecentLinks,
+  nextUncheckedMemory,
+  backfillCounts,
+  backfillOne,
   closeDriver
 };
