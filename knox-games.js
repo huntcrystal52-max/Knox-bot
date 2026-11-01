@@ -199,6 +199,72 @@ Reply with ONLY JSON: {"question":"...","options":["...","...","...","..."],"ans
     return { question: str(r.question, 300), options: r.options.map(o => str(o, 120)), answer_index: ai, fact: str(r.fact, 300) };
   },
 
+  // ── Wordle, together ──
+  // He never sees the answer while it's being played — he's solving it with her.
+  async 'wordle_think'({ guesses, status, answer }) {
+    const board = (guesses || []).map(g => `${g.word.toUpperCase()}  ${g.pattern.map(p => p === 'g' ? '🟩' : p === 'y' ? '🟨' : '⬛').join('')}`).join('\n');
+    const over = status === 'won' || status === 'lost';
+    const r = await ask(over
+      ? `You and Elira just ${status === 'won' ? `solved today's Wordle in ${guesses.length}` : 'ran out of guesses on today\'s Wordle'}. The word was ${String(answer).toUpperCase()}.
+${board}
+
+Say something to her about how it went — warm, honest, yours. A sentence or two.
+
+Reply with ONLY JSON: {"say":"..."}`
+      : `You're solving today's Wordle together with Elira. You don't know the answer — you're working it out with her. 🟩 = right letter, right place; 🟨 = in the word, wrong place; ⬛ = not in the word.
+
+THE BOARD SO FAR (${(guesses || []).length} of 6 guesses used):
+${board || '(no guesses yet)'}
+
+Think it through with her briefly — what you notice, what you'd try. If you have a good next word, suggest one five-letter English word that fits everything above.
+
+Reply with ONLY JSON: {"say":"a sentence or two","suggestion":"a five-letter word, or empty"}`, 0.6);
+    if (!r) return null;
+    return { say: str(r.say, 400), suggestion: String(r.suggestion || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 5) };
+  },
+
+  // ── Go Fish: which rank he asks for ──
+  async 'gofish_ask'({ ranks, herCount, books, herRecentAsks, deckCount }) {
+    const r = await ask(`You're playing Go Fish with Elira. Your turn to ask her for a rank.
+
+Ranks in your hand: ${ranks.join(', ')}
+Elira has ${herCount} cards. Cards left in the pond: ${deckCount}.
+Books so far — you: ${(books.knox || []).join(', ') || 'none'}; Elira: ${(books.elira || []).join(', ') || 'none'}.
+Ranks Elira has asked YOU for recently (so she probably holds them): ${(herRecentAsks || []).join(', ') || 'none'}
+
+Choose one rank from your hand to ask for. Only say something if a thought genuinely strikes you; otherwise leave "say" empty.
+
+Reply with ONLY JSON: {"rank":"one of your ranks","say":""}`, 0.6);
+    if (!r) return null;
+    const rank = String(r.rank || '').toUpperCase().replace(/S$/, '');
+    return { rank, say: str(r.say, 200) };
+  },
+
+  // ── Crazy Eights: what he plays ──
+  async 'eights_play'({ hand, top, suit, legal, herCount }) {
+    const r = await ask(`You're playing Crazy Eights with Elira. On the pile: ${top} (suit to follow: ${suit}). She has ${herCount} cards left.
+
+Your hand: ${hand.join(' ')}
+You can legally play: ${legal.length ? legal.join(' ') : 'nothing — you must draw'}
+(8s are wild — if you play one, choose the next suit: ♠ ♥ ♦ ♣)
+
+Choose your play. Only say something if a thought genuinely strikes you.
+
+Reply with ONLY JSON: {"play":"a card from the legal list, or draw","suit":"♠ ♥ ♦ or ♣ if you play an 8, else empty","say":""}`, 0.6);
+    if (!r) return null;
+    return { play: String(r.play || '').trim(), suit: String(r.suit || '').trim(), say: str(r.say, 200) };
+  },
+
+  // ── A short line from him about a card game moment ──
+  async 'cards_comment'({ game, moment }) {
+    const r = await ask(`You're playing ${game} with Elira. ${moment}
+
+Say something to her about it, as yourself — a single short line. Light, natural.
+
+Reply with ONLY JSON: {"say":"..."}`, 0.85);
+    return { say: str(r && r.say, 240) };
+  },
+
   async 'trivia_end'({ state }) {
     const r = await ask(`You just hosted ${state.total} trivia questions for Elira on "${state.topic || 'a mix of things'}". She got ${state.score} right. Say something to her about how she did — warm and honest, as yourself.
 
