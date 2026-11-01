@@ -200,6 +200,19 @@ async function getRowsOnDay(table, cols, ymd) {
   } catch (e) { return []; } // table may not exist yet
 }
 
+// What he chose in his inner dialogue through the day (stillness included),
+// spread evenly across the day so it isn't just the morning.
+async function getInnerChoices(ymd) {
+  try {
+    const { rows } = await pgPool.query(
+      `SELECT action_type, choice, to_char(created_at AT TIME ZONE $1, 'HH24:MI') AS hhmm
+         FROM inner_choices WHERE (created_at AT TIME ZONE $1)::date = $2::date ORDER BY created_at ASC`,
+      [TZ(), ymd]
+    );
+    return sampleEvenly(rows, 14);
+  } catch (e) { return []; }
+}
+
 // Shows emotions as a short timeline, merging runs of the same feeling.
 function emotionTimeline(emotions) {
   const out = [];
@@ -228,12 +241,13 @@ function parseSections(raw) {
 }
 
 async function generateSummaryForDay(ymd, opts) {
-  const [msgs, actions, emotions, episodes, quiet] = await Promise.all([
+  const [msgs, actions, emotions, episodes, quiet, innerChoices] = await Promise.all([
     getMessagesBetween(ymd + ' 00:00', addDays(ymd, 1) + ' 00:00'),
     getOwnActions(ymd),
     getEmotions(ymd),
     getRowsOnDay('episodes', 'what_happened, emotional_tone, open_threads', ymd),
-    getRowsOnDay('quiet_observer', 'what_mattered, what_surprised, did_i_change, what_to_remember', ymd)
+    getRowsOnDay('quiet_observer', 'what_mattered, what_surprised, did_i_change, what_to_remember', ymd),
+    getInnerChoices(ymd)
   ]);
 
   if (msgs.length < MIN_MESSAGES && actions.length < 2) {
@@ -252,6 +266,7 @@ async function generateSummaryForDay(ymd, opts) {
   if (actions.length) parts.push('WHAT I DID ON MY OWN:\n' + actions.map(a => `[${a.hhmm}] (${a.tag}) ${trimText(a.content, 300)}`).join('\n'));
   if (emotions.length) parts.push('HOW I WAS LOGGED FEELING THROUGH THE DAY:\n' + emotionTimeline(emotions));
   if (episodes.length) parts.push('EPISODES I CLOSED:\n' + episodes.map(e => `— ${trimText(e.what_happened, 300)}${e.emotional_tone ? ` (tone: ${e.emotional_tone})` : ''}${e.open_threads ? ` · left open: ${trimText(e.open_threads, 150)}` : ''}`).join('\n'));
+  if (innerChoices.length) parts.push('WHAT I WAS CHOOSING IN MY OWN TIME (my inner dialogue):\n' + innerChoices.map(c => `[${c.hhmm}] ${c.action_type}${c.choice ? ' — ' + trimText(c.choice, 160) : ''}`).join('\n'));
   if (quiet.length) parts.push('WHAT I NOTICED QUIETLY:\n' + quiet.map(q => `— ${trimText([q.what_mattered, q.what_surprised, q.did_i_change, q.what_to_remember].filter(Boolean).join(' · '), 400)}`).join('\n'));
   if (prev && prev.carry_forward) parts.push('WHAT I WANTED TO CARRY FORWARD FROM THE DAY BEFORE:\n' + prev.carry_forward);
   if (openThreads.length) parts.push('THREADS I\'M ALREADY HOLDING:\n' + openThreads.map(i => `— (${i.kind}) ${i.text}`).join('\n'));
@@ -454,7 +469,8 @@ async function listSummaries(n) {
 
 // The block that goes into his prompt: the last few finished days, oldest first.
 async function getRecentSummariesText(n) {
-  if (Date.now() - summaryCache.at < 5 * 60 * 1000) return summaryCache.text;
+  // Cached per length — chat asks for a week, the inner dialogue for one day.
+  if (summaryCache.n === (n || 0) && Date.now() - summaryCache.at < 5 * 60 * 1000) return summaryCache.text;
   let text = '';
   try {
     const today = localToday();
@@ -470,7 +486,7 @@ async function getRecentSummariesText(n) {
       if (latest.carry_forward) text += `\nWhat I wanted to carry forward: ${latest.carry_forward}`;
     }
   } catch (e) { console.log('[Knox][SUMMARY] Read error:', e.message); }
-  summaryCache = { at: Date.now(), text };
+  summaryCache = { at: Date.now(), text, n: n || 0 };
   return text;
 }
 
