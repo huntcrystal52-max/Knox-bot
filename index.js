@@ -120,6 +120,7 @@ const integrity = require('./knox-integrity');
 const linkBackfill = require('./knox-link-backfill');
 const reach = require('./knox-reach');
 const chess = require('./knox-chess');
+const games = require('./knox-games');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -506,6 +507,63 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   // reflect unprompted (prompt omitted). This never applies, commits, or
   // deploys anything — it only writes a row to self_proposals for her to
   // read and decide on.
+  // ─── INTERNAL: Talking games — Knox's part of one turn ──────────────────
+  if (parsed.pathname === '/internal/game/turn' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        updateConversationState(); // she's here, playing
+        const { turn, payload } = JSON.parse(body || '{}');
+        const out = await games.turn(turn, payload);
+        res.writeHead(out.error ? 502 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(out));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] game turn error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
+  // ─── INTERNAL: A game ended — remember it ───────────────────────────────
+  if (parsed.pathname === '/internal/game/finished' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { memory } = JSON.parse(body || '{}');
+        const text = String(memory || '').slice(0, 1500);
+        if (text) {
+          const mem = await saveMemory('assistant', text, 'surface', 0.75, 'game', null);
+          if (mem) {
+            const synced = neo4jMemory.createMemoryNode({ id: String(mem.id), content: text, role: 'assistant', createdAt: mem.created_at });
+            neo4jMemory.linkExchange([mem.id], text, synced).catch(() => {});
+          }
+          console.log('[Knox][GAMES] Remembered:', text.slice(0, 120));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] game finished error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   // ─── INTERNAL: Chess — Knox chooses his move ────────────────────────────
   // The app owns the board and rules; Knox only ever picks from the legal
   // moves it sends, so he can't make an illegal one.
