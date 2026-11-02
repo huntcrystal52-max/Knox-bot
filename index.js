@@ -507,6 +507,71 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   // reflect unprompted (prompt omitted). This never applies, commits, or
   // deploys anything — it only writes a row to self_proposals for her to
   // read and decide on.
+  // ─── INTERNAL: Talking during a game ────────────────────────────────────
+  // Elira says something while they play. Knox answers as his full self —
+  // the same pipeline as chat (constitution, memories, reach, integrity) —
+  // with the game's current state in front of him. Saved tagged 'game_chat'
+  // so it's remembered without crowding the Home chat log.
+  if (parsed.pathname === '/internal/game/chat' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { game, context, recent, message } = JSON.parse(body || '{}');
+        const said = String(message || '').trim().slice(0, 1500);
+        if (!said) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'message is required' })); return; }
+        updateConversationState();
+        const moodState = await getMoodState();
+        if (moodState.is_sleeping) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ text: null, mode: 'sleep' })); return; }
+
+        const previousEmotionalState = await getRecentEmotionalState();
+        const previousEmotion = previousEmotionalState ? previousEmotionalState.knox_emotion : 'anchored';
+        const history = await getMemories();
+        const semanticContext = await smartRecall(said);
+        const recentText = (recent || []).slice(-10).map(l => `${l.who === 'elira' ? 'Elira' : l.who === 'knox' ? 'You' : '—'}: ${String(l.text || '').slice(0, 300)}`).join('\n');
+        const framed = `[You're in the Games room with Elira, playing ${String(game || 'a game').slice(0, 60)}.
+Where the game stands right now:
+${String(context || '').slice(0, 2500)}
+${recentText ? `\nWhat's been said during this game:\n${recentText}\n` : ''}
+Keep any secret the game needs you to keep (your hidden cards, your 20 Questions answer, a trivia answer). Answer her naturally, as yourself — like talking across the table while you play. You can't make game moves from here; she plays hers on the board.]
+
+Elira says: ${said}`;
+
+        const result = await getResponse(framed, history, moodState, previousEmotionalState, null, null, semanticContext);
+        if (result.slept) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ text: null, mode: 'sleep' })); return; }
+        const reply = result.text || (result.mode === 'silence' ? (result.emoji || '🔥') : null);
+        if (!reply) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ text: null, mode: result.mode || 'speak' })); return; }
+
+        const gameName = String(game || 'a game').slice(0, 60);
+        const emotional = analyseEmotionalMoment(said, reply, previousEmotion);
+        const userMem = await saveMemory('user', `[While playing ${gameName}] ${said}`, 'surface', 0.8, 'game_chat', emotional.eliraObserved);
+        const assistMem = await saveMemory('assistant', reply, 'surface', 0.8, 'game_chat', emotional.knoxEmotion);
+        if (userMem && assistMem) {
+          await associateMemories(String(userMem.id), String(assistMem.id));
+          const syncs = [
+            neo4jMemory.createMemoryNode({ id: String(userMem.id), content: `[While playing ${gameName}] ${said}`, role: 'user', createdAt: userMem.created_at }).catch(() => {}),
+            neo4jMemory.createMemoryNode({ id: String(assistMem.id), content: reply, role: 'assistant', createdAt: assistMem.created_at }).catch(() => {})
+          ];
+          neo4jMemory.linkExchange([userMem.id, assistMem.id], `Elira (playing ${gameName}): ${said}\nKnox: ${reply}`, Promise.all(syncs)).catch(() => {});
+        }
+        integrity.afterReply(said, reply);
+        reach.afterReply(said, reply, semanticContext, history);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ text: reply, mode: result.mode || 'speak' }));
+      } catch (e) {
+        console.log('[Knox][INTERNAL] game chat error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   // ─── INTERNAL: Talking games — Knox's part of one turn ──────────────────
   if (parsed.pathname === '/internal/game/turn' && req.method === 'POST') {
     if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
