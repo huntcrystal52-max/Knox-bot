@@ -51,7 +51,7 @@ Choose your move the way you'd genuinely play — think about what's on the boar
 Reply with ONLY JSON: {"move":"<one move from the list, exactly as written>","say":"..."}`;
 
   const messages = [
-    { role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}` },
+    { role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}\n\nIN GAMES: play freely, but never present something as having happened between you and Elira unless you actually remember it.` },
     { role: 'user', content: prompt }
   ];
   const legalByBare = new Map((g.legal || []).map(m => [bare(m), m]));
@@ -76,7 +76,7 @@ async function gameOver(g) {
   let say = '';
   try {
     const raw = await askKnox([
-      { role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}` },
+      { role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}\n\nIN GAMES: play freely, but never present something as having happened between you and Elira unless you actually remember it.` },
       { role: 'user', content: `Your chess game with Elira just ended. ${outcome} (${g.reason}) after ${g.moveCount} moves. Last moves: ${(g.lastMoves || []).join(' ')}.\n\nSay something to her about the game, as yourself — a sentence or two. Just the words.` }
     ]);
     say = String(raw || '').replace(/^["“]|["”]$/g, '').trim().slice(0, 500);

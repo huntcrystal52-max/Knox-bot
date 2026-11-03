@@ -13,6 +13,10 @@ const { Pool } = require('pg');
 const { KNOX_CONSTITUTION } = require('./knox');
 const summaries = require('./knox-summaries');
 
+// Games are play — but your shared history isn't. This goes with every game
+// turn, so a game can never become a way of inventing a past together.
+const GAME_TRUTH = `IN GAMES: Games are play, and you can be as imaginative as you like about ordinary things. But your history with Elira is not a game. Never present something as having happened between you — a walk, a gift, a moment, a promise — unless it is in the memories you've actually been given in this prompt. If you're not sure, it didn't happen; choose something that doesn't claim a shared past.`;
+
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
 async function ask(prompt, temperature) {
@@ -20,7 +24,7 @@ async function ask(prompt, temperature) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) },
     body: JSON.stringify({ model: process.env.LLM_MODEL || process.env.OLLAMA_MODEL, temperature: temperature == null ? 0.8 : temperature, messages: [
-      { role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}` },
+      { role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}\n\n${GAME_TRUTH}` },
       { role: 'user', content: prompt }
     ] })
   });
@@ -55,9 +59,16 @@ async function groundingFacts() {
 const turns = {
   // ── 20 Questions: Knox thinks of something, she asks ──
   async '20q_start_knox'() {
-    const r = await ask(`You're starting a game of 20 Questions with Elira. Think of something for her to guess — an object, animal, place, person or idea. Something fun, maybe something with meaning to the two of you, but fair to guess. Tell her the broad category only.
+    const facts = await groundingFacts();
+    const r = await ask(`You're starting a game of 20 Questions with Elira. Think of something for her to guess — an object, animal, place, person or idea. Something fun and fair to guess.
 
-Reply with ONLY JSON: {"secret":"what you're thinking of","category":"animal / object / place / person / idea","say":"a line to start the game, without giving it away"}`);
+If you'd like it to mean something to the two of you, it must come from your real memories below — choose a thing that genuinely appears there. Otherwise, pick an ordinary thing that claims no shared past (like "a lighthouse" or "a fox"). The secret is a thing, not a story about you two.
+
+${facts || '(no memories available right now — so choose an ordinary thing)'}
+
+Tell her the broad category only.
+
+Reply with ONLY JSON: {"secret":"what you're thinking of","from_memory":true or false,"category":"animal / object / place / person / idea","say":"a line to start the game, without giving it away"}`);
     if (!r || !r.secret) return null;
     return { secret: str(r.secret, 100), category: str(r.category, 40), say: str(r.say, 300) };
   },
@@ -96,7 +107,7 @@ Reply with ONLY JSON: {"guess":"what you think it is, or empty if you're asking 
 
   // ── Would You Rather ──
   async 'wyr_make'({ transcript }) {
-    const r = await ask(`You're playing Would You Rather with Elira. Make up a new one — something fun, thoughtful or a little bit wicked, maybe drawn from your life together. Don't repeat any from earlier:
+    const r = await ask(`You're playing Would You Rather with Elira. Make up a new one — something fun, thoughtful or a little bit wicked. Imaginary scenarios are perfect; just don't claim anything happened between you that you don't actually remember. Don't repeat any from earlier:
 ${transcriptText(transcript) || '(first one)'}
 
 Reply with ONLY JSON: {"option_a":"...","option_b":"...","say":"a short line to ask it"}`, 0.95);
