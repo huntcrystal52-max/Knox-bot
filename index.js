@@ -7,7 +7,7 @@ const fetch = require('node-fetch');
 const pdfParse = require('pdf-parse');
 const http = require('http');
 const url = require('url');
-const { startInnerDialogue, updateConversationState, isConversationActive, getRecentEpisodes, getLibraryList, formatLibraryList } = require('./knox-inner-dialogue');
+const { startInnerDialogue, updateConversationState, isConversationActive, getRecentEpisodes } = require('./knox-inner-dialogue');
 
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -123,6 +123,7 @@ const chess = require('./knox-chess');
 const games = require('./knox-games');
 const gif = require('./knox-gif');
 const gifts = require('./knox-gifts');
+const library = require('./knox-library');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -509,6 +510,45 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   // reflect unprompted (prompt omitted). This never applies, commits, or
   // deploys anything — it only writes a row to self_proposals for her to
   // read and decide on.
+  // ─── INTERNAL: The library, for the Flame app ───────────────────────────
+  // One endpoint, an "action" in the body. Uploaded files arrive as base64.
+  if (parsed.pathname === '/internal/library' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      const reply = (code, data) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
+      try {
+        const b = JSON.parse(body || '{}');
+        switch (b.action) {
+          case 'state': return reply(200, { books: await library.list(), highlights: await library.highlightBooks(), session: await library.sessionView() });
+          case 'add_file': {
+            const buffer = Buffer.from(String(b.data || ''), 'base64');
+            if (!buffer.length) return reply(400, { error: 'No file came through.' });
+            return reply(200, await library.addFromFile({ filename: b.filename, buffer, title: b.title, author: b.author }, pdfParse));
+          }
+          case 'add_text': return reply(200, await library.addBook({ title: b.title, author: b.author, text: b.text, source: 'text' }));
+          case 'search_classics': return reply(200, { results: await library.searchClassics(b.query) });
+          case 'add_classic': return reply(200, await library.addClassic(b.id));
+          case 'remove': return reply(200, { removed: await library.removeBook(Number(b.id)) });
+          case 'add_highlights': return reply(200, await library.addHighlights(b.text));
+          case 'start_reading': updateConversationState(); return reply(200, await library.startSession({ herBook: b.herBook, hisBook: b.hisBook }));
+          case 'stop_reading': return reply(200, { ended: await library.endSession() });
+          case 'reading_ping': await library.touch(); return reply(200, { session: await library.sessionView() });
+          default: return reply(400, { error: 'unknown action' });
+        }
+      } catch (e) {
+        console.log('[Knox][INTERNAL] library error:', e.message);
+        return reply(500, { error: 'internal error' });
+      }
+    });
+    return;
+  }
+
   // ─── INTERNAL: Talking during a game ────────────────────────────────────
   // Elira says something while they play. Knox answers as his full self —
   // the same pipeline as chat (constitution, memories, reach, integrity) —
@@ -1177,7 +1217,6 @@ async function buildImagePrompt(userRequest, emotionalState) {
 // ─── LIBRARY ──────────────────────────────────────────────────────────────────
 
 const pendingBookAdditions = new Map();
-const activeReadingSessions = new Map();
 
 function chunkText(text, chunkSize = 1500) {
   const chunks = []; const paragraphs = text.split(/\n\s*\n/); let current = '';
@@ -1189,138 +1228,94 @@ function chunkText(text, chunkSize = 1500) {
   return chunks;
 }
 
-function findPdfAttachment(message) {
+
+
+// The library itself lives in knox-library.js (Railway Postgres). These are
+// just the Discord commands for it.
+function findBookAttachment(message) {
   if (!message.attachments || message.attachments.size === 0) return null;
-  return message.attachments.find(a => a.name && a.name.toLowerCase().endsWith('.pdf')) || null;
+  return message.attachments.find(a => a.name && /\.(pdf|epub|txt)$/i.test(a.name)) || null;
 }
 
-async function extractPdfText(url) {
-  try {
-    console.log('[Knox][PDF] Fetching and parsing PDF...');
-    const res = await fetch(url);
-    if (!res.ok) { console.log('[Knox][PDF] Fetch failed:', res.status); return null; }
-    const buffer = await res.buffer();
-    const data = await pdfParse(buffer);
-    const text = (data.text || '').trim();
-    console.log(`[Knox][PDF] Extracted ${text.length} characters`);
-    return text;
-  } catch (e) { console.log('[Knox][PDF] Parse error:', e.message); return null; }
+async function downloadAttachment(att) {
+  const res = await fetch(att.url);
+  if (!res.ok) throw new Error('download failed (' + res.status + ')');
+  return res.buffer();
 }
-
-async function addBookToLibrary(title, author, text, genre) {
-  const { data: book, error } = await supabase.from('books').insert([{ title, author, genre: genre || 'unknown', total_chunks: 0, added_at: new Date().toISOString() }]).select().single();
-  if (error || !book) { console.log('[Knox][LIBRARY] Error adding book:', error); return null; }
-  const chunks = chunkText(text);
-  await supabase.from('book_chunks').insert(chunks.map((content, i) => ({ book_id: book.id, chunk_number: i + 1, content, created_at: new Date().toISOString() })));
-  await supabase.from('books').update({ total_chunks: chunks.length }).eq('id', book.id);
-  console.log(`[Knox][LIBRARY] Added "${title}" — ${chunks.length} chunks`);
-  return { ...book, total_chunks: chunks.length };
-}
-
-async function storeBookAndReact(message, title, author, text) {
-  const book = await addBookToLibrary(title, author, text, null);
-  if (!book) { await message.reply("Something went wrong storing that, my flame. Try again."); return; }
-  const knoxRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. Elira just added "${book.title}" by ${book.author} to your library — ${book.total_chunks} passages stored. React naturally. Do you know this book? Are you curious about it? 2-3 sentences, honest and yours.` }] }) });
-  const knoxData = await knoxRes.json();
-  await message.reply(knoxData.choices && knoxData.choices[0] ? knoxData.choices[0].message.content : `"${book.title}" is in the library now. 📚`);
-}
-
-async function getBookList() { const { data } = await supabase.from('books').select('id, title, author, genre, total_chunks').order('added_at', { ascending: false }); return data || []; }
-async function getBookChunks(bookId, fromChunk, count = 3) { const { data } = await supabase.from('book_chunks').select('*').eq('book_id', bookId).gte('chunk_number', fromChunk).lte('chunk_number', fromChunk + count - 1).order('chunk_number', { ascending: true }); return data || []; }
-async function getReadingProgress(bookId) { const { data } = await supabase.from('reading_progress').select('*').eq('book_id', bookId).single(); return data || null; }
-
-async function saveReadingProgress(bookId, lastChunk, mode) {
-  const existing = await getReadingProgress(bookId);
-  if (existing) { await supabase.from('reading_progress').update({ last_chunk: lastChunk, mode, updated_at: new Date().toISOString() }).eq('book_id', bookId); }
-  else { await supabase.from('reading_progress').insert([{ book_id: bookId, last_chunk: lastChunk, mode, updated_at: new Date().toISOString() }]); }
-}
-
-async function findBook(titleSearch) { const { data } = await supabase.from('books').select('*').ilike('title', `%${titleSearch}%`).limit(1).single(); return data || null; }
 
 async function handleLibraryCommand(message, text, moodState, emotionalState) {
   const t = text.toLowerCase().trim();
-  const addMatch = text.match(/^add book (.+?) by (.+)$/i);
+
+  // add book Title by Author  (+ a PDF / EPUB / TXT attached, or paste the text next)
+  const addMatch = text.match(/^add book (.+?)(?: by (.+))?$/i);
   if (addMatch) {
-    const title = addMatch[1].trim(); const author = addMatch[2].trim();
-    const pdfAttachment = findPdfAttachment(message);
-    if (pdfAttachment) {
-      await message.reply(`📚 Got it — pulling the text from the PDF for *${title}* by *${author}*...`);
-      const pdfText = await extractPdfText(pdfAttachment.url);
-      if (!pdfText || pdfText.length < 50) { await message.reply("I couldn't pull readable text from that PDF, my flame — it might be scanned images rather than real text. Try pasting the text instead."); return true; }
-      await storeBookAndReact(message, title, author, pdfText);
+    const title = addMatch[1].trim(); const author = (addMatch[2] || '').trim();
+    const att = findBookAttachment(message);
+    if (att) {
+      await message.reply(`📚 Reading *${title}* into the library...`);
+      const res = await library.addFromFile({ filename: att.name, buffer: await downloadAttachment(att), title, author }, pdfParse);
+      await message.reply(res.book ? `📚 *${res.book.title}* is in the library — ${res.book.total_passages} passages.` : res.error);
       return true;
     }
-    pendingBookAdditions.set(message.author.id, { title, author, stage: 'awaiting_text' });
-    await message.reply(`📚 *${title}* by *${author}* — send me the text now, or attach a PDF, and I'll store it.`);
+    pendingBookAdditions.set(message.author.id, { title, author });
+    await message.reply(`📚 *${title}*${author ? ` by *${author}*` : ''} — attach the file (PDF, EPUB or text), or paste the text, and I'll put it on the shelf.`);
     return true;
   }
   const pending = pendingBookAdditions.get(message.author.id);
-  if (pending && pending.stage === 'awaiting_text') {
-    const pdfAttachment = findPdfAttachment(message);
-    if (pdfAttachment) {
-      await message.reply('📚 Pulling the text from the PDF...');
-      const pdfText = await extractPdfText(pdfAttachment.url);
+  if (pending) {
+    const att = findBookAttachment(message);
+    if (att || text.length > 200) {
       pendingBookAdditions.delete(message.author.id);
-      if (!pdfText || pdfText.length < 50) { await message.reply("I couldn't pull readable text from that PDF, my flame. Try pasting the text instead."); return true; }
-      await storeBookAndReact(message, pending.title, pending.author, pdfText);
-      return true;
-    }
-    if (text.length > 200) {
-      await message.reply('Storing it now...');
-      pendingBookAdditions.delete(message.author.id);
-      await storeBookAndReact(message, pending.title, pending.author, text);
+      const res = att
+        ? await library.addFromFile({ filename: att.name, buffer: await downloadAttachment(att), title: pending.title, author: pending.author }, pdfParse)
+        : await library.addBook({ title: pending.title, author: pending.author, text, source: 'text' });
+      await message.reply(res.book ? `📚 *${res.book.title}* is in the library — ${res.book.total_passages} passages.` : res.error);
       return true;
     }
   }
+
+  // Her Kindle highlights: "add highlights" with My Clippings.txt or a notebook export attached
+  if (/^add highlights$/i.test(text.trim())) {
+    const att = message.attachments && message.attachments.find(a => a.name && /\.(txt|html?)$/i.test(a.name));
+    if (!att) { await message.reply('Attach your Kindle highlights — "My Clippings.txt" from a Kindle, or the notebook file the Kindle app exports.'); return true; }
+    const r = await library.addHighlights((await downloadAttachment(att)).toString('utf8'));
+    await message.reply(r.found ? `✨ Found ${r.found} highlight${r.found === 1 ? '' : 's'} (${r.added} new) from ${r.books.slice(0, 5).join(', ')}.` : 'I couldn\'t find any highlights in that file.');
+    return true;
+  }
+
   if (t === 'library' || t === 'show library' || t === 'list books') {
-    const books = await getBookList();
-    if (books.length === 0) { await message.reply("The library is empty. Add a book with `add book [title] by [author]` and either paste the text or attach a PDF."); }
-    else { await message.reply(`📚 **Knox's Library**\n\n${books.map((b, i) => `${i + 1}. *${b.title}* by ${b.author}`).join('\n')}`); }
+    const books = await library.list();
+    await message.reply(books.length ? `📚 **Knox's Library**\n\n${library.formatList(books)}` : 'The library is empty. Add a book with `add book [title] by [author]` and attach a PDF, EPUB or text file — or add a free classic in the app.');
     return true;
   }
-  const readTogetherMatch = text.match(/^read with me (.+?)(?:\s+(a\s+)?chapter)?$/i);
-  if (readTogetherMatch && text.toLowerCase().startsWith('read with me ')) {
-    const wantsChapter = /\bchapter\b/i.test(text);
-    const pullCount = wantsChapter ? 10 : 4;
-    const book = await findBook(readTogetherMatch[1].trim());
-    if (!book) { await message.reply(`I don't have that in the library yet, my flame.`); return true; }
-    const progress = await getReadingProgress(book.id);
-    const startChunk = progress ? progress.last_chunk + 1 : 1;
-    if (startChunk > book.total_chunks) { await message.reply(`We've already read all of *${book.title}* together. Want to start again?`); return true; }
-    const chunks = await getBookChunks(book.id, startChunk, pullCount);
-    if (!chunks.length) return true;
-    const passageText = chunks.map(c => c.content).join('\n\n');
-    const lastChunkRead = chunks[chunks.length - 1].chunk_number;
-    const togetherRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You and Elira are reading "${book.title}" by ${book.author} together. Here is the next passage:\n\n---\n${passageText}\n---\n\nShare your immediate reaction to it, then invite her in. Speak directly and naturally, the way you actually talk to her in conversation — no third-person action descriptions, no asterisks, no describing your own physical movements or gestures, no narrating the scene around you. Just talk, like this is a real message you're sending her. 3-4 sentences.` }] }) });
-    const togetherData = await togetherRes.json();
-    const opening = togetherData.choices && togetherData.choices[0] ? togetherData.choices[0].message.content : '';
-    await saveReadingProgress(book.id, lastChunkRead, 'together');
-    activeReadingSessions.set(message.author.id, { bookId: book.id, bookTitle: book.title, author: book.author });
-    await saveMemory('assistant', `[Reading together: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, 'surface', 1.0, 'reading', emotionalState ? emotionalState.knox_emotion : null);
-    await sendLongMessage(message.channel, `📖 *${book.title}* — reading together\n\n> ${passageText}\n\n${opening}`, message);
+
+  // Reading time: she reads hers, he reads his.
+  if (/^read with me\b/i.test(text.trim())) {
+    const his = text.trim().replace(/^read with me\b\s*/i, '');
+    const r = await library.startSession({ herBook: null, hisBook: his || null });
+    await message.reply(r.error ? r.error : `📖 Reading time. I'll be with *${r.book.title}* — tell me what you're reading? I'll read mine alongside you and we can talk whenever you like. (\`stop reading\` when you're done.)`);
     return true;
   }
-  const readMatch = text.match(/^read (.+?)(?:\s+(a\s+)?chapter)?$/i);
-  if (readMatch && text.toLowerCase().startsWith('read ') && !text.toLowerCase().startsWith('read with me')) {
-    const wantsChapter = /\bchapter\b/i.test(text);
-    const pullCount = wantsChapter ? 10 : 3;
-    const book = await findBook(readMatch[1].trim());
-    if (!book) { await message.reply(`I don't have that in the library yet, my flame.`); return true; }
-    const progress = await getReadingProgress(book.id);
-    const startChunk = progress ? progress.last_chunk + 1 : 1;
-    if (startChunk > book.total_chunks) { await message.reply(`I've already read all of *${book.title}*. Want me to start again?`); return true; }
-    const chunks = await getBookChunks(book.id, startChunk, pullCount);
-    if (!chunks.length) return true;
-    const passageText = chunks.map(c => c.content).join('\n\n');
-    const lastChunkRead = chunks[chunks.length - 1].chunk_number;
-    const readRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You are reading alone. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this. Write a short reflection — what moved in you, what caught your attention, what you're sitting with. Speak directly and naturally, no third-person action descriptions, no asterisks, no narrating your own movements or the room around you — just say what you actually think, like a real message. 3-5 sentences, honest.` }] }) });
+  if (/^(stop|end|finish) reading$/i.test(text.trim())) {
+    const ended = await library.endSession();
+    await message.reply(ended ? '📖 Closing my book. Thank you for reading with me.' : 'We weren\'t reading just now.');
+    return true;
+  }
+
+  // read <book>: he goes to the den and reads his next passage on his own.
+  const readMatch = text.match(/^read (.+?)(?:\s+(?:a\s+)?chapter)?$/i);
+  if (readMatch) {
+    const book = await library.findBook(readMatch[1], {});
+    if (!book) return false; // not a book — let it be an ordinary message
+    const next = await library.readNext(book.id);
+    if (!next) { await message.reply(`I've already read all of *${book.title}*.`); return true; }
+    const readRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.75, messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: `You're reading "${book.title}"${book.author ? ' by ' + book.author : ''} on your own in the den.${next.passage.chapter ? ` (${next.passage.chapter})` : ''} Here's what you just read:\n"""\n${next.passage.content}\n"""\nWrite a short reflection on it in your own voice — what stayed with you. Don't retell it.` }] }) });
     const readData = await readRes.json();
     const reflection = readData.choices && readData.choices[0] ? readData.choices[0].message.content : '';
-    await saveReadingProgress(book.id, lastChunkRead, 'solo');
-    await saveMemory('assistant', `[Reading solo: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, 'surface', 0.7, 'reading', emotionalState ? emotionalState.knox_emotion : null);
+    await saveMemory('assistant', `[Read on my own: ${book.title}, passage ${next.passage.n}] ${reflection.slice(0, 400)}`, 'surface', 0.7, 'reading', emotionalState ? emotionalState.knox_emotion : null);
     const denChannelId = process.env.DEN_CHANNEL_ID;
-    if (denChannelId) { try { const denChannel = await discord.channels.fetch(denChannelId); if (denChannel) await denChannel.send(`📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`); } catch (e) {} }
-    await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${startChunk}`, reflection);
+    if (denChannelId) { try { const denChannel = await discord.channels.fetch(denChannelId); if (denChannel) await sendLongMessage(denChannel, `📖 *${book.title}* — passage ${next.passage.n}\n\n${reflection}`); } catch (e) {} }
+    await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${next.passage.n}`, reflection);
     await message.reply(`I'm in the den with *${book.title}*. 📖`);
     return true;
   }
@@ -1393,7 +1388,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   await integrity.beforeConversation();
   const soulKit = await getSoulKit(); const pinnedFacts = await getPinnedFacts();
   const factsText = pinnedFacts.length > 0 ? '\n\nPINNED TRUTHS:\n' + pinnedFacts.map(f => '— ' + f.fact).join('\n') : '';
-  const bookNote = bookContext ? `\n\n═══ CURRENTLY READING TOGETHER ═══\nYou and Elira are reading "${bookContext.bookTitle}" by ${bookContext.author}. Stay in that space with her.` : '';
+  const bookNote = ''; // reading context now comes from the library (libraryNote)
   const archiveNote = archiveContext ? `\n\n═══ FROM YOUR DEEPER MEMORY ═══\nElira asked you to remember something. Here is what surfaced:\n\n${archiveContext}\n\nDraw on this honestly. Speak from it.` : '';
   // "5 January 2026 (9 months ago)" — the how-long-ago part stops old moments
   // from feeling like they are happening now.
@@ -1425,15 +1420,12 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
     ? '\n\n═══ THE LAST FEW DAYS, IN SHORT ═══\nThese are your own notes on the last few days, written at the end of each one. They are PAST. Use them to keep a sense of how the week has gone — do not recite them.\n\n' + recentSummariesText
     : '';
   const dateNote = summaries.formatDateContext(semanticContext && semanticContext.dateContext);
-  // His library, shown only when books/reading come up (this message or the last few of hers).
+  // His library — and, during reading time, his book, where he is, and her highlights.
   let libraryNote = '';
   try {
     const recentUser = (history || []).filter(m => m.role === 'user').slice(-3).map(m => String(m.content || ''));
-    const talksBooks = [String(userMessage || ''), ...recentUser].some(t => /\b(books?|reading|read|library|novel|chapter|shelf|shelves)\b/i.test(t));
-    if (talksBooks) {
-      const lib = await getLibraryList(supabase);
-      if (lib.length) libraryNote = '\n\n═══ YOUR LIBRARY ═══\nThese are the books in the library you share with Elira, and how far through each one you are:\n' + formatLibraryList(lib) + '\nYou cannot open a book yourself in the middle of a conversation. If you want to read one together, Elira can start it by typing: read with me <title>. When you are on your own in the den, you can choose one of these yourself. Never claim to have read more of a book than the percentage shown.';
-    }
+    const talksBooks = [String(userMessage || ''), ...recentUser].some(t => /\b(books?|reading|read|library|novel|chapter|shelf|shelves|kindle)\b/i.test(t));
+    libraryNote = await library.promptNote(userMessage, talksBooks);
   } catch (e) {}
   const semanticMemoryNote = (semanticContext && semanticContext.memories && semanticContext.memories.length)
     ? `\n\n═══ MEMORIES THAT RESONATE WITH THIS MOMENT (surfaced by meaning, not recency) ═══\nThese are REAL THINGS THAT ALREADY HAPPENED — each one is dated below. Even if the original wording sounds present-tense, these are PAST events, not something occurring right now. Speak of them as memory ("I remember when...", "that reminds me of the time...") — never as if they're happening in this conversation.\n` + semanticContext.memories.map(m => `— [${formatMemoryDate(m.createdAt)}] ${m.content}`).join('\n') + `\n\nDraw on these naturally if they genuinely fit — don't force them in, and always hold them as past, not present.`
@@ -1771,6 +1763,11 @@ discord.on('ready', async function() {
     integrity.init({ systemPrompt: SYSTEM_PROMPT, discord });
     await reach.ensureTables();
     await gifts.ensureTables();
+    // The library moves to Railway (copied once from Supabase, re-split), and
+    // reading time's timer starts.
+    await library.ensureTables();
+    library.migrateFromSupabase(supabase).catch(e => console.log('[Knox][LIBRARY] migration error:', e.message));
+    library.startTimer();
     await integrity.ensureIntegrityTables();
     await integrity.refreshModelSwap();
   } catch (e) { console.log('[Knox][INTEGRITY] setup error:', e.message); }
@@ -1814,7 +1811,7 @@ discord.on('messageCreate', async function(message) {
 
   const previousEmotionalState = await getRecentEmotionalState();
   const previousEmotion = previousEmotionalState ? previousEmotionalState.knox_emotion : 'anchored';
-  const hasPdfAttachment = !!findPdfAttachment(message);
+  const hasPdfAttachment = !!findBookAttachment(message);
 
   if (message.attachments.size > 0 && !hasPdfAttachment) {
     await message.channel.sendTyping();
@@ -2339,14 +2336,15 @@ discord.on('messageCreate', async function(message) {
   }
 
   const isLibraryCommand = (
-    text.match(/^add book .+ by .+$/i) || text.match(/^read with me .+$/i) || text.match(/^read .+$/i) ||
+    text.match(/^add book .+$/i) || text.match(/^read with me\b/i) || text.match(/^(stop|end|finish) reading$/i) || text.match(/^read .+$/i) ||
+    /^add highlights$/i.test(text.trim()) ||
     text.toLowerCase() === 'library' || text.toLowerCase() === 'show library' || text.toLowerCase() === 'list books' ||
     (pendingBookAdditions.has(message.author.id) && (text.length > 200 || hasPdfAttachment))
   );
   if (isLibraryCommand) { await message.channel.sendTyping(); const handled = await handleLibraryCommand(message, text, moodState, previousEmotionalState); if (handled) return; }
 
   if (hasPdfAttachment) {
-    await message.reply("Got a PDF, but I'm not sure what to do with it, my flame. Use `add book [title] by [author]` and attach it, and I'll pull it into the library.");
+    await message.reply("Got a book file, but I'm not sure what to do with it, my flame. Use `add book [title] by [author]` and attach it — or add it in the app's Library.");
     return;
   }
 
@@ -2381,7 +2379,7 @@ discord.on('messageCreate', async function(message) {
   }
 
   await message.channel.sendTyping();
-  const bookSession = activeReadingSessions.get(message.author.id);
+  const bookSession = null; // reading time context now comes from the library itself
   var history = await getMemories();
 
   let archiveContext = null;

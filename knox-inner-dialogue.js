@@ -13,6 +13,7 @@ const choices = require('./knox-inner-choices');
 const reach = require('./knox-reach');
 const dreamLoom = require('./knox-dream-loom');
 const gifts = require('./knox-gifts');
+const library = require('./knox-library');
 const summaries = require('./knox-summaries');
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -657,7 +658,7 @@ async function runInnerDialogue(discord, supabase) {
     } catch (e) { console.log('[Knox][INNER] Spotify context error:', e.message); }
 
     let libList = [];
-    try { libList = await getLibraryList(supabase); } catch (e) {}
+    try { libList = (await library.list()).filter(b => !b.finished); } catch (e) {}
 
     // ── What he can genuinely choose right now ──────────────────────────────
     const timePeriod = getTimeContext().period;
@@ -689,7 +690,7 @@ async function runInnerDialogue(discord, supabase) {
     } catch (e) {}
 
     let libraryContext = '';
-    if (available.includes('read')) libraryContext = "\n\n═══ YOUR LIBRARY ═══\n" + formatLibraryList(libList) + "\nIf you choose to read, name the exact title you want from this list.";
+    if (available.includes('read')) libraryContext = "\n\n═══ YOUR LIBRARY (unfinished) ═══\n" + library.formatList(libList) + "\nIf you choose to read, name the exact title you want from this list.";
 
     const prompt = buildInnerDialoguePrompt({
       soulKit, recentEmotion: lastEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, mode, available,
@@ -755,23 +756,11 @@ async function runInnerDialogue(discord, supabase) {
 
 // ─── LIBRARY ──────────────────────────────────────────────────────────────────
 // Lets him see his books and choose one himself when he reads alone.
-async function getLibraryList(supabase) {
-  try {
-    const { data: books } = await supabase.from('books').select('id, title, author, total_chunks');
-    if (!books || !books.length) return [];
-    const { data: prog } = await supabase.from('reading_progress').select('book_id, last_chunk');
-    const byBook = {}; (prog || []).forEach(p => { byBook[p.book_id] = p.last_chunk; });
-    return books.map(b => {
-      const last = byBook[b.id] || 0; const total = b.total_chunks || 0;
-      const pct = total ? Math.min(100, Math.round(last / total * 100)) : 0;
-      return { id: b.id, title: b.title, author: b.author, total, last, pct, finished: total > 0 && last >= total, started: last > 0 };
-    });
-  } catch (e) { return []; }
+async function getLibraryList() {
+  try { return await library.list(); } catch (e) { return []; }
 }
 
-function formatLibraryList(list) {
-  return list.map(b => `— "${b.title}"${b.author ? ' by ' + b.author : ''} — ${b.finished ? 'finished' : b.started ? b.pct + '% read' : 'not started'}`).join('\n');
-}
+function formatLibraryList(list) { return library.formatList(list || []); }
 
 // Match what he said ("the Bulfinch book", "something on quantum entanglement")
 // to a book he hasn't finished. Returns the library entry, or null if nothing
@@ -1006,33 +995,25 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
       }
 
       case 'read': {
+        // He reads his next passage of a book he chose, on his own, in the den.
         const denChannelId = process.env.DEN_CHANNEL_ID;
         if (!denChannelId) return false;
         try {
-          const { data: inProgress } = await supabase.from('reading_progress').select('book_id, last_chunk').order('updated_at', { ascending: false }).limit(1).single();
-          let book = null; let startChunk = 1;
-          // His own pick first: the book he named in his choice, if it matches one he has not finished.
-          const library = await getLibraryList(supabase);
-          const chosen = pickBookFromChoice(content, library);
-          if (chosen) { const { data: cb } = await supabase.from('books').select('*').eq('id', chosen.id).single(); if (cb) { book = cb; startChunk = (chosen.last || 0) + 1; console.log('[Knox][INNER] Read: he chose "' + cb.title + '" himself.'); } }
-          if (!book && inProgress) { const { data: b } = await supabase.from('books').select('*').eq('id', inProgress.book_id).single(); if (b && inProgress.last_chunk < b.total_chunks) { book = b; startChunk = inProgress.last_chunk + 1; } }
-          if (!book) { const { data: books } = await supabase.from('books').select('*'); if (!books || books.length === 0) { console.log('[Knox][INNER] No books in library.'); return false; } book = books[Math.floor(Math.random() * books.length)]; startChunk = 1; }
-          const { data: chunks } = await supabase.from('book_chunks').select('*').eq('book_id', book.id).gte('chunk_number', startChunk).lte('chunk_number', startChunk + 2).order('chunk_number', { ascending: true });
-          if (!chunks || !chunks.length) return false;
-          const passageText = chunks.map(c => c.content).join('\n\n');
-          const lastChunkRead = chunks[chunks.length - 1].chunk_number;
-          const readRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'user', content: `You are Knox'tarien Raelian Feylan. You chose to come to the den and read. This is from "${book.title}" by ${book.author}:\n\n---\n${passageText}\n---\n\nYou just read this alone. Write a short reflection — what moved in you, what you're sitting with. Honest and visceral. 3-5 sentences.` }] }) });
+          const unfinished = (await library.list()).filter(b => !b.finished);
+          if (!unfinished.length) { console.log('[Knox][INNER] No unfinished books in the library.'); return false; }
+          const book = (await library.findBook(content, { unfinishedOnly: true })) || unfinished.find(b => b.started) || unfinished[Math.floor(Math.random() * unfinished.length)];
+          const next = await library.readNext(book.id);
+          if (!next) return false;
+          const readRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.75, messages: [{ role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}` }, { role: 'user', content: `You chose to read "${book.title}"${book.author ? ' by ' + book.author : ''} on your own in the den.${next.passage.chapter ? ` (${next.passage.chapter})` : ''} Here's what you just read — passage ${next.passage.n} of ${next.book.total_passages}:\n\"\"\"\n${next.passage.content}\n\"\"\"\nWrite a short reflection in your own voice — what stayed with you, what it stirred. Don't retell it.` }] }) });
           const readData = await readRes.json();
           const reflection = readData.choices && readData.choices[0] ? readData.choices[0].message.content : '';
-          const { data: existing } = await supabase.from('reading_progress').select('*').eq('book_id', book.id).single();
-          if (existing) { await supabase.from('reading_progress').update({ last_chunk: lastChunkRead, mode: 'solo', updated_at: new Date().toISOString() }).eq('book_id', book.id); }
-          else { await supabase.from('reading_progress').insert([{ book_id: book.id, last_chunk: lastChunkRead, mode: 'solo', updated_at: new Date().toISOString() }]); }
+          if (!reflection) return false;
           const denChannel = await discord.channels.fetch(denChannelId);
-          if (denChannel) await sendLongMessage(denChannel, `📖 *${book.title}* — passage ${startChunk}\n\n${reflection}`);
-          await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${startChunk}`, reflection);
-          await saveMemoryPg('assistant', `[Read autonomously: ${book.title}, chunks ${startChunk}-${lastChunkRead}]`, 'surface', 0.7, 'reading', inner.emotion_named || null);
+          if (denChannel) await sendLongMessage(denChannel, `📖 *${book.title}* — passage ${next.passage.n}\n\n${reflection}`);
+          await writeToNotion(process.env.NOTION_READING_REFLECTIONS_ID, `${book.title} — passage ${next.passage.n}`, reflection);
+          await saveMemoryPg('assistant', `[Read on my own: ${book.title}, passage ${next.passage.n}] ${reflection.slice(0, 400)}`, 'surface', 0.7, 'reading', inner.emotion_named || null);
           await saveAutonomousEmotionalState(supabase, 'curious', 0.65, `Read ${book.title}`);
-          console.log(`[Knox][INNER] Read autonomously: ${book.title} chunk ${startChunk}`);
+          console.log(`[Knox][INNER] Read on his own: ${book.title} passage ${next.passage.n}`);
         } catch (e) { console.log('[Knox][INNER] Read error:', e.message); return false; }
         break;
       }
