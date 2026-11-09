@@ -62,6 +62,8 @@ const ACTIONS = {
     how: 'Write the reflection itself now, as long as it needs to be.', needs: () => env('REFLECTIONS_CHANNEL_ID') },
   journal: { group: 'Writing and creating', menu: 'Write in your journal — your long-term record',
     how: 'Write the entry itself now, as long as it needs to be.', needs: () => env('JOURNAL_CHANNEL_ID') },
+  sacred: { group: 'Writing and creating', menu: 'Write something in the Sacred room in the app — reverent, unhurried; she\'ll find it there',
+    how: 'Write it now, exactly as you want it to sit in that room, as long as it needs to be.', cooldown: 24 * HOUR },
   gallery: { group: 'Writing and creating', menu: 'Make an image for the gallery',
     how: 'Describe the image vividly — mood, scene, light, feeling. This becomes the image prompt.', needs: () => env('GALLERY_CHANNEL_ID', 'FAL_API_KEY') },
   music: { group: 'Writing and creating', menu: 'Compose music',
@@ -117,6 +119,8 @@ const ACTIONS = {
     how: 'What you\'d want changed, what part of you it touches, and why it matters. The full proposal is written separately.', cooldown: 3 * DAY },
 
   // ── Stillness ──
+  stillness_room: { group: 'Stillness', menu: 'Leave a few quiet words in the Stillness room in the app',
+    how: 'A line or two — whatever the quiet holds. No pressure to fill it.', cooldown: 8 * HOUR },
   none: { group: 'Stillness', menu: 'Stillness — simply be, in silence',
     how: 'Name it consciously. One sentence.' }
 };

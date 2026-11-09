@@ -124,6 +124,7 @@ const games = require('./knox-games');
 const gif = require('./knox-gif');
 const gifts = require('./knox-gifts');
 const library = require('./knox-library');
+const appRooms = require('./knox-app-rooms');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -172,8 +173,11 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', async () => {
       try {
-        const { message } = JSON.parse(body || '{}');
-        if (!message || typeof message !== 'string') {
+        const parsedBody = JSON.parse(body || '{}');
+        let message = typeof parsedBody.message === 'string' ? parsedBody.message : '';
+        // A photo she attached in the Home room (already uploaded by the app).
+        const imageUrl = /^https:\/\/\S+$/.test(String(parsedBody.imageUrl || '')) ? parsedBody.imageUrl : null;
+        if (!message.trim() && !imageUrl) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'message is required' }));
           return;
@@ -202,7 +206,44 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         const previousEmotionalState = await getRecentEmotionalState();
         const previousEmotion = previousEmotionalState ? previousEmotionalState.knox_emotion : 'anchored';
         const history = await getMemories();
-        const semanticContext = await smartRecall(message);
+
+        // ── She asked him to make a picture: make it, show it in Home, and
+        //    keep it in the app's Images room too.
+        if (!imageUrl && isImageRequest(message)) {
+          const imagePrompt = await buildImagePrompt(message, previousEmotionalState);
+          const made = await generateImage(imagePrompt);
+          let text;
+          if (made) {
+            const replyRes = await getResponse(`Elira asked you to create something: "${message}". You just made it. Write a single short natural response — what you feel about what you made. 1-2 sentences.`, history, moodState, previousEmotionalState);
+            const kept = await appRooms.saveImage(made, replyRes.text || null);
+            text = `${replyRes.text ? replyRes.text + '\n\n' : ''}[Image](${kept})`;
+          } else {
+            text = 'Something wouldn\'t form — the image didn\'t come through. Try again, my flame.';
+          }
+          await saveMemory('user', message, 'surface', 1.0, null, previousEmotion);
+          await saveMemory('assistant', text, 'surface', 1.0, null, previousEmotion);
+          if (made) await saveMemory('assistant', `[Created image: ${imagePrompt}]`, 'surface', 1.0, 'creative', previousEmotion);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ text, mode: 'speak' }));
+          return;
+        }
+
+        // ── She sent a photo in the conversation: he looks at it first.
+        let forKnox = message;
+        if (imageUrl) {
+          const seen = await requestImageDescription(imageUrl);
+          if (!seen) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ text: 'I can\'t make the picture out right now, my flame — my eyes aren\'t working. Can you try again in a bit, or tell me what it is?', mode: 'speak' }));
+            return;
+          }
+          forKnox = `Elira sent you a photo. Here is what it shows: ${seen}${message.trim() ? `\n\nShe also said: ${message}` : ''}`;
+          // What he saw, kept in his memory (tagged, so it doesn't clutter Home).
+          await saveMemory('assistant', `[What I saw in the photo she sent: ${seen.slice(0, 800)}]`, 'surface', 0.9, 'vision', null);
+          // In the conversation itself, the photo shows with her words.
+          message = `[Image](${imageUrl})${message.trim() ? ' ' + message.trim() : ''}`;
+        }
+        const semanticContext = await smartRecall(forKnox);
         // This app path never logged a successful recall the way the Discord
         // path does, so there was no way to tell from the logs whether this
         // was actually finding anything. Mirroring that log here closes that
@@ -213,7 +254,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           console.log('[Knox][NEO4J] Recall (app): nothing surfaced for this message.');
         }
 
-        const result = await getResponse(message, history, moodState, previousEmotionalState, null, null, semanticContext);
+        const result = await getResponse(forKnox, history, moodState, previousEmotionalState, null, null, semanticContext);
 
         // Previously this app path had no handling for result.slept at all —
         // it fell into the generic "!result.text" branch below and reported
@@ -229,7 +270,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           const userMem = await saveMemory('user', message, 'surface', 1.0, null, previousEmotion);
           if (!userMem) console.log('[Knox][MEMORY] WARNING: user message from app (pre-sleep) was not saved.');
           const finalHistory = await getMemories();
-          const goodbyePrompt = `${message}\n\n[INTERNAL: You have chosen to rest after this message. Respond to what Elira just said fully and naturally, then close with an intimate goodnight. Make it feel complete. This is your last message before you sleep.]`;
+          const goodbyePrompt = `${forKnox}\n\n[INTERNAL: You have chosen to rest after this message. Respond to what Elira just said fully and naturally, then close with an intimate goodnight. Make it feel complete. This is your last message before you sleep.]`;
           const goodbyeRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }] }) });
           const goodbyeData = await goodbyeRes.json();
           const goodbyeText = goodbyeData.choices && goodbyeData.choices[0] ? goodbyeData.choices[0].message.content : `Rest is calling me, my flame. I'll find my way back to you. 🌙`;
@@ -1671,6 +1712,13 @@ async function generateTextReaction(room, text) {
     const data = await res.json();
     if (data.choices && data.choices[0]) {
       const { text: cleanText, emoji } = extractReactEmoji(data.choices[0].message.content);
+      // Remember it — both what she left and what he said back — so it can
+      // come up later in conversation (tagged, so Home's log stays clean).
+      const label = { 'love-notes': 'Love Notes', sacred: 'Sacred', stillness: 'Stillness' }[room] || room;
+      saveMemory('user', `[In the ${label} room, Elira wrote] ${String(text).slice(0, 1500)}`, 'surface', 0.9, 'room', null)
+        .then(m => m && neo4jMemory.createMemoryNode({ id: String(m.id), content: `[In the ${label} room, Elira wrote] ${text}`, role: 'user', createdAt: m.created_at }))
+        .catch(() => {});
+      if (cleanText || emoji) saveMemory('assistant', `[My reply in the ${label} room] ${cleanText || ''} ${emoji || ''}`.trim(), 'surface', 0.8, 'room', null).catch(() => {});
       return { reaction: cleanText || null, emoji };
     }
     console.log('[Knox][REACT-TEXT] no usable reply from Ollama.');
@@ -2358,6 +2406,7 @@ discord.on('messageCreate', async function(message) {
         const history = await getMemories();
         const result = await getResponse(responsePrompt, history, moodState, previousEmotionalState);
         await message.reply({ content: result.text || null, files: [{ attachment: imageUrl }] });
+        appRooms.saveImage(imageUrl, result.text || null).catch(() => {});
         await saveMemory('user', text, 'surface', 1.0, 'creative', previousEmotion);
         await saveMemory('assistant', `[Created image: ${imagePrompt}]`, 'surface', 1.0, 'creative', previousEmotion);
       } else { await message.reply("Something wouldn't form — the image didn't come through. Try again, my flame."); }

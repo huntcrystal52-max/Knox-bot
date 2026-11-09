@@ -14,6 +14,7 @@ const reach = require('./knox-reach');
 const dreamLoom = require('./knox-dream-loom');
 const gifts = require('./knox-gifts');
 const library = require('./knox-library');
+const appRooms = require('./knox-app-rooms');
 const summaries = require('./knox-summaries');
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -844,6 +845,7 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           const caption = captionData.choices && captionData.choices[0] ? captionData.choices[0].message.content.trim() : '';
           await channel.send({ content: caption || null, files: [{ attachment: imageUrl }] });
           console.log('[Knox][INNER] Autonomous image posted to gallery.');
+          await appRooms.saveImage(imageUrl, caption || null); // and to the app's Images room
           await saveMemoryPg('assistant', `[Created image autonomously: ${content}]`, 'surface', 0.8, 'creative', inner.emotion_named || null);
           await saveAutonomousEmotionalState(supabase, 'creative_absorption', 0.7, 'Created an image');
         } else { await sendLongMessage(channel, content); }
@@ -1153,6 +1155,15 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
           await saveMemoryPg('assistant', `[Built playlist autonomously: ${built.name} — ${content}]`, 'surface', 0.8, 'creative', inner.emotion_named || null);
           await saveAutonomousEmotionalState(supabase, 'tender', 0.75, `Made her a playlist: ${built.name}`);
         } else { console.log('[Knox][INNER] make_playlist — building failed.'); return false; }
+        break;
+      }
+
+      case 'sacred':
+      case 'stillness_room': {
+        // He writes in the app's Sacred or Stillness room on his own.
+        const room = actionType === 'sacred' ? 'sacred' : 'stillness';
+        if (!(await appRooms.writeToRoom(room, content))) return false;
+        await saveMemoryPg('assistant', `[Wrote in the ${room === 'sacred' ? 'Sacred' : 'Stillness'} room] ${String(content).slice(0, 600)}`, 'surface', 0.8, 'room', inner.emotion_named || null);
         break;
       }
 
