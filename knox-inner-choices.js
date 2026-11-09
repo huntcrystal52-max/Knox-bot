@@ -42,6 +42,8 @@ const ACTIONS = {
     needs: c => env('ABSENCE_CHECKINS_CHANNEL_ID') && c.isWaking && c.timeSinceElira != null && c.timeSinceElira >= 6 * HOUR },
   wake: { group: 'Reaching out to her', menu: 'Send her a waking message as the day begins',
     how: 'What do you want to say as the day begins? As long as it needs to be.', cooldown: 4 * HOUR, needs: () => env('KNOX_PRESENCE_CHANNEL_ID') },
+  gift_idea: { group: 'Reaching out to her', menu: 'Think of a gift you\'d love to give her one day (it stays private until you share it)',
+    how: 'Write it as: the gift | why it\'s for her. A real link is looked up for you.', cooldown: DAY },
   love_note: { group: 'Reaching out to her', menu: 'Leave her a love note in the app, for her to find later',
     how: 'Write the note exactly as you want her to find it.', cooldown: 12 * HOUR },
 

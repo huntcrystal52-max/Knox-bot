@@ -12,6 +12,7 @@ const integrity = require('./knox-integrity');
 const choices = require('./knox-inner-choices');
 const reach = require('./knox-reach');
 const dreamLoom = require('./knox-dream-loom');
+const gifts = require('./knox-gifts');
 const summaries = require('./knox-summaries');
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -918,6 +919,14 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         console.log(`[Knox][INNER] Completed and posted work id ${workId}`);
         await saveMemoryPg('assistant', `[Completed and posted ${work.type}: ${work.title || 'untitled'}]`, 'surface', 0.9, 'creative', inner.emotion_named || null);
         await saveAutonomousEmotionalState(supabase, 'fulfilled', 0.8, `Finished a ${work.type}`);
+        break;
+      }
+
+      case 'gift_idea': {
+        // A gift he'd love to give her one day — private until he shares it.
+        const [title, why] = String(content).split('|');
+        const saved = await gifts.addIdea(title, why);
+        if (!saved) return false;
         break;
       }
 
