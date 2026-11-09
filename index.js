@@ -125,6 +125,7 @@ const gif = require('./knox-gif');
 const gifts = require('./knox-gifts');
 const library = require('./knox-library');
 const appRooms = require('./knox-app-rooms');
+const google = require('./knox-google');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -133,6 +134,27 @@ const memoryMigration = require('./knox-migration');
 
 const spotifyHttpServer = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
+
+  // ─── Knox's Google account (email + Drive): one-time sign-in ─────────────
+  if (parsed.pathname === '/login/google') {
+    if (!google.configured()) { res.writeHead(500); res.end('Google settings are missing on Knox-bot (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI).'); return; }
+    res.writeHead(302, { Location: google.authUrl() });
+    res.end();
+    return;
+  }
+  if (parsed.pathname === '/callback/google') {
+    if (parsed.query.error || !parsed.query.code) { res.writeHead(400); res.end('Google sign-in was cancelled.'); return; }
+    try {
+      const who = await google.exchangeCode(parsed.query.code);
+      if (!who) { res.writeHead(400); res.end('Google sign-in failed. Check the Railway logs.'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<h1>🔥 Knox is connected to Google${typeof who === 'string' ? ' as ' + who.replace(/[<>&]/g, '') : ''}.</h1><p>Email and Drive are ready. You can close this tab now.</p>`);
+    } catch (e) {
+      console.log('[Knox][GOOGLE] Callback error:', e.message);
+      res.writeHead(500); res.end('Something went wrong during the Google sign-in.');
+    }
+    return;
+  }
 
   if (parsed.pathname === '/login/spotify') {
     res.writeHead(302, { Location: spotify.getSpotifyAuthUrl() });
@@ -1487,7 +1509,10 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   // The gift list: his private ideas for her, and her wishlist.
   let giftNote = '';
   try { giftNote = await gifts.promptNote(); } catch (e) {}
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  // A Drive file she's talking about.
+  let driveNote = '';
+  try { driveNote = await google.promptNote(userMessage); } catch (e) {}
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -1774,6 +1799,74 @@ async function handleImageMessage(message, text, moodState, previousEmotionalSta
   return false;
 }
 
+// ─── EMAIL AND DRIVE (Knox's Google account) ─────────────────────────────────
+
+const stripChatTags = (t) => String(t || '').replace(/\[GIF:[^\]]*\](\([^)]*\))?/gi, '').replace(/\[(REACT|SILENCE):[^\]]*\]/gi, '').trim();
+
+// Reads any new email from Elira and writes back — only while he's awake.
+async function checkEmail() {
+  const st = await google.status();
+  if (!st.connected) return;
+  const moodState = await getMoodState();
+  if (moodState.is_sleeping) return; // he'll read it when he wakes
+  const emails = await google.newEmailsFromElira();
+  for (const e of emails) {
+    await google.markRead(e.id);
+    await google.recordIncoming(e);
+    const earlier = (await google.threadSoFar(e.threadId)).filter(x => x.body !== e.body).slice(-4);
+    const framed = `[Elira sent you an email.
+Subject: ${e.subject}
+${earlier.length ? `\nEarlier in this thread:\n${earlier.map(x => `${x.direction === 'in' ? 'Elira' : 'You'}: ${String(x.body).slice(0, 800)}`).join('\n---\n')}\n` : ''}
+Her email:
+"""
+${e.body}
+"""
+
+Write your reply as an email — like a letter, in your own voice. Just the body: no subject line, no stage directions.]`;
+    const history = await getMemories();
+    const previousEmotionalState = await getRecentEmotionalState();
+    const semanticContext = await smartRecall(e.body.slice(0, 1500));
+    const result = await getResponse(framed, history, moodState, previousEmotionalState, null, null, semanticContext);
+    const reply = stripChatTags(result.text);
+    const inMem = await saveMemory('user', `[Email from Elira — "${e.subject}"] ${e.body.slice(0, 2500)}`, 'surface', 1.0, 'email', null);
+    if (!reply) { console.log('[Knox][GOOGLE] Read her email; chose not to reply.'); continue; }
+    const sent = await google.send({ body: reply, replyTo: e });
+    if (!sent) continue;
+    const outMem = await saveMemory('assistant', `[My email reply — "${e.subject}"] ${reply.slice(0, 2500)}`, 'surface', 1.0, 'email', null);
+    if (inMem && outMem) {
+      const syncs = [
+        neo4jMemory.createMemoryNode({ id: String(inMem.id), content: `[Email from Elira — "${e.subject}"] ${e.body}`, role: 'user', createdAt: inMem.created_at }).catch(() => {}),
+        neo4jMemory.createMemoryNode({ id: String(outMem.id), content: `[My email reply] ${reply}`, role: 'assistant', createdAt: outMem.created_at }).catch(() => {})
+      ];
+      neo4jMemory.linkExchange([inMem.id, outMem.id], `Elira (email): ${e.body}\nKnox (email): ${reply}`, Promise.all(syncs)).catch(() => {});
+    }
+    integrity.afterReply(e.body, reply);
+    reach.afterReply(e.body, reply, semanticContext, history);
+  }
+}
+
+// Notices new files she's shared with him on Drive, reads them, remembers
+// them, and tells her in Home that he's seen them.
+async function checkDrive() {
+  const st = await google.status();
+  if (!st.connected) return;
+  const files = await google.newDriveFiles({ pdfParse, describeImage: requestImageDescription });
+  if (!files.length) return;
+  const moodState = await getMoodState();
+  for (const f of files) {
+    const excerpt = String(f.text || '').replace(/\s+/g, ' ').slice(0, 700);
+    const mem = await saveMemory('user', `[Elira ${f.updated ? 'updated' : 'shared'} a file with me on Drive: "${f.name}"] ${excerpt}`, 'surface', 0.9, 'drive', null);
+    if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `[Elira shared a file with me: "${f.name}"] ${String(f.text || '').slice(0, 3000)}`, role: 'user', createdAt: mem.created_at }).catch(() => {});
+    console.log(`[Knox][GOOGLE] Read a ${f.updated ? 'changed' : 'new'} Drive file: "${f.name}".`);
+    if (moodState.is_sleeping) continue; // he's read it; he'll mention it when they next talk
+    const history = await getMemories();
+    const previousEmotionalState = await getRecentEmotionalState();
+    const result = await getResponse(`[Elira just ${f.updated ? 'updated' : 'put'} "${f.name}" in the Drive folder she shares with you. You've read it — here's how it begins:\n"""\n${String(f.text || '(no readable text)').slice(0, 2500)}\n"""\nLet her know you've seen it — a line or two, natural, as yourself. You can say what struck you.]`, history, moodState, previousEmotionalState);
+    const note = stripChatTags(result.text);
+    if (note) await saveMemory('assistant', note, 'surface', 0.9, null, null); // shows in Home
+  }
+}
+
 // ─── UTILS ────────────────────────────────────────────────────────────────────
 
 function sendLongMessage(channel, text, originalMessage) {
@@ -1816,6 +1909,15 @@ discord.on('ready', async function() {
     await library.ensureTables();
     library.migrateFromSupabase(supabase).catch(e => console.log('[Knox][LIBRARY] migration error:', e.message));
     library.startTimer();
+    // Knox's Google account: check email every 5 minutes, Drive every 10.
+    await google.ensureTables();
+    if (google.configured() && !global.__knoxGoogleTimers) {
+      global.__knoxGoogleTimers = true;
+      setInterval(() => checkEmail().catch(e => console.log('[Knox][GOOGLE] email check error:', e.message)), 5 * 60 * 1000);
+      setInterval(() => checkDrive().catch(e => console.log('[Knox][GOOGLE] drive check error:', e.message)), 10 * 60 * 1000);
+      setTimeout(() => checkEmail().catch(() => {}), 60 * 1000);
+      setTimeout(() => checkDrive().catch(() => {}), 90 * 1000);
+    }
     await integrity.ensureIntegrityTables();
     await integrity.refreshModelSwap();
   } catch (e) { console.log('[Knox][INTEGRITY] setup error:', e.message); }
@@ -1851,7 +1953,7 @@ discord.on('messageCreate', async function(message) {
 
   var text = message.content.replace('<@' + discord.user.id + '>', '').trim();
   const moodState = await getMoodState();
-  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image|reset garden image|reset garden foundation|backfill links start|backfill links pause|backfill links status|memory links|integrity status|integrity check|integrity resolve|llm usage|reach status)$/i.test(text.trim())
+  const isAdminCommand = /^(start migration|start memory migration|start archival migration|reset archival migration|show flagged memories|review flagged memories|delete all flagged|delete all flagged memories|yes delete all flagged|reset migration|migration status|show deleted flags|review deleted flags|restore all deleted|restore all deleted flags|check archival schema|show stories|sample stories|fix vector indexes|show me the garden|visit the garden|show garden|regenerate garden image|redo garden image|reset garden image|reset garden foundation|backfill links start|backfill links pause|backfill links status|memory links|integrity status|integrity check|integrity resolve|llm usage|reach status|google status)$/i.test(text.trim())
     || (/^(delete|dismiss|restore)\b/i.test(text.trim()) && /\d/.test(text));
   if (moodState.is_sleeping && !isAdminCommand) return;
 
@@ -2176,6 +2278,16 @@ discord.on('messageCreate', async function(message) {
       const cut = (t, n) => { t = String(t || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
       const lines = recent.map(l => `• **${cut(l.from, 70)}**\n  ↳ linked to (${String(l.toDate || '').slice(0, 10)}) *${cut(l.to, 70)}*\n  why: ${l.reason} (strength ${Number(l.strength).toFixed(1)})`);
       await sendLongMessage(message.channel, `🕸️ **Memory web links:** ${count} in total\n\n` + (lines.length ? '**Most recent:**\n' + lines.join('\n\n') : 'None made yet — they appear as you talk.'), message);
+    } catch (e) { await message.reply('Something flickered: ' + e.message); }
+    return;
+  }
+
+  if (text.trim().toLowerCase() === 'google status') {
+    try {
+      const st = await google.status();
+      await message.reply(!st.configured ? 'Google isn\'t set up yet — the GOOGLE_ settings are missing in Railway.'
+        : !st.connected ? 'Google settings are in, but I\'m not signed in yet. Visit /login/google on Knox-bot while signed into my Google account.'
+        : `📬 Signed in as **${st.email}**. I read email only from: ${st.eliraEmails.join(', ') || '(nobody — set ELIRA_EMAILS)'}. Checking email every 5 minutes, Drive every 10.`);
     } catch (e) { await message.reply('Something flickered: ' + e.message); }
     return;
   }

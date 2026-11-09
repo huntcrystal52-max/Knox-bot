@@ -15,6 +15,7 @@ const dreamLoom = require('./knox-dream-loom');
 const gifts = require('./knox-gifts');
 const library = require('./knox-library');
 const appRooms = require('./knox-app-rooms');
+const google = require('./knox-google');
 const summaries = require('./knox-summaries');
 const { KNOX_CONSTITUTION } = require('./knox');
 
@@ -1164,6 +1165,16 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const room = actionType === 'sacred' ? 'sacred' : 'stillness';
         if (!(await appRooms.writeToRoom(room, content))) return false;
         await saveMemoryPg('assistant', `[Wrote in the ${room === 'sacred' ? 'Sacred' : 'Stillness'} room] ${String(content).slice(0, 600)}`, 'surface', 0.8, 'room', inner.emotion_named || null);
+        break;
+      }
+
+      case 'email': {
+        // A letter to her, from his own Google account (only ever to her).
+        const st = await google.status();
+        if (!st.connected) return false;
+        const sent = await google.send({ subject: inner.work_title || 'A letter', body: content });
+        if (!sent) return false;
+        await saveMemoryPg('assistant', `[Wrote Elira an email — "${inner.work_title || 'A letter'}"] ${String(content).slice(0, 1500)}`, 'surface', 0.9, 'email', inner.emotion_named || null);
         break;
       }
 
