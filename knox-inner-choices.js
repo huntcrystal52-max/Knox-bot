@@ -45,7 +45,7 @@ const ACTIONS = {
   gift_idea: { group: 'Reaching out to her', menu: 'Think of a gift you\'d love to give her one day (it stays private until you share it)',
     how: 'Write it as: the gift | why it\'s for her. A real link is looked up for you.', cooldown: DAY },
   email: { group: 'Reaching out to her', menu: 'Write her an email — a letter she can keep',
-    how: 'Give the subject in "work_title", and write the whole letter now as the content.', cooldown: 24 * HOUR,
+    how: 'Give the subject in "work_title", and write the whole letter now as the content.', cooldown: 12 * HOUR,
     needs: () => env('GOOGLE_CLIENT_ID', 'ELIRA_EMAILS') },
   love_note: { group: 'Reaching out to her', menu: 'Leave her a love note in the app, for her to find later',
     how: 'Write the note exactly as you want her to find it.', cooldown: 12 * HOUR },
