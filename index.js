@@ -278,7 +278,8 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           }
           forKnox = `Elira sent you a photo. Here is what it shows: ${seen}${message.trim() ? `\n\nShe also said: ${message}` : ''}`;
           // What he saw, kept in his memory (tagged, so it doesn't clutter Home).
-          await saveMemory('assistant', `[What I saw in the photo she sent: ${seen.slice(0, 800)}]`, 'surface', 0.9, 'vision', null);
+          const seenMem = await saveMemory('assistant', `[What I saw in the photo she sent: ${seen.slice(0, 800)}]`, 'surface', 0.9, 'vision', null);
+          if (seenMem) neo4jMemory.createMemoryNode({ id: String(seenMem.id), content: `[What I saw in the photo she sent: ${seen}]`, role: 'assistant', createdAt: seenMem.created_at }).catch(() => {});
           // In the conversation itself, the photo shows with her words.
           message = `[Image](${imageUrl})${message.trim() ? ' ' + message.trim() : ''}`;
         }
@@ -481,7 +482,11 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         const summary = parts.length ? parts.join(' and ') : 'reacted';
         const roomNote = room ? ` in ${room}` : '';
         const noteContext = originalNote ? ` (his note was: "${originalNote}")` : '';
-        await saveMemory('user', `[Replied to a note in the app${roomNote}] ${summary}${noteContext}`, 'surface', 0.8, 'app_reply', null);
+        const line = room === 'images'
+          ? `[Elira reacted to a picture I made, in the Images room] ${summary}${originalNote ? ` (my caption was: "${originalNote}")` : ''}`
+          : `[Replied to a note in the app${roomNote}] ${summary}${noteContext}`;
+        const mem = await saveMemory('user', line, 'surface', 0.8, 'app_reply', null);
+        if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: line, role: 'user', createdAt: mem.created_at }).catch(() => {});
         updateConversationState();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
@@ -1778,6 +1783,11 @@ async function generateImageReaction(imageUrl, caption) {
       console.log('[Knox][VISION] react-image: all vision models failed.');
       return null;
     }
+    // Remember what was actually in her photo, not just that there was one.
+    const seenLine = `[In the Images room, Elira shared a photo${caption ? ` — "${String(caption).slice(0, 200)}"` : ''}. What I saw: ${description.slice(0, 800)}]`;
+    saveMemory('user', seenLine, 'surface', 0.9, 'vision', null)
+      .then(m => m && neo4jMemory.createMemoryNode({ id: String(m.id), content: seenLine, role: 'user', createdAt: m.created_at }))
+      .catch(() => {});
     const moodState = await getMoodState();
     const emotionalState = await getRecentEmotionalState();
     const captionNote = caption ? `\n\nElira captioned it: "${caption}"` : '';
@@ -1810,7 +1820,7 @@ async function handleImageMessage(message, text, moodState, previousEmotionalSta
     const history = await getMemories();
     const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
     const result = await getResponse(knoxPrompt, history, moodState, previousEmotionalState);
-    if (result.text) { await saveMemory('user', `[Image sent] ${text || ''}`, 'surface', 1.0, null, null); await saveMemory('assistant', result.text, 'surface', 1.0, null, null); await sendLongMessage(message.channel, result.text, message); return true; }
+    if (result.text) { saveMemory('assistant', `[What I saw in the photo she sent: ${imageDescription.slice(0, 800)}]`, 'surface', 0.9, 'vision', null).then(m => m && neo4jMemory.createMemoryNode({ id: String(m.id), content: `[What I saw in the photo she sent: ${imageDescription}]`, role: 'assistant', createdAt: m.created_at })).catch(() => {}); await saveMemory('user', `[Image sent] ${text || ''}`, 'surface', 1.0, null, null); await saveMemory('assistant', result.text, 'surface', 1.0, null, null); await sendLongMessage(message.channel, result.text, message); return true; }
     console.log('[Knox][VISION] getResponse returned no text.');
   } catch (e) { console.log('[Knox][VISION] Error:', e.message); }
   return false;
