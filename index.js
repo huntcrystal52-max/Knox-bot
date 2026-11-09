@@ -135,6 +135,23 @@ const memoryMigration = require('./knox-migration');
 const spotifyHttpServer = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
 
+  // ─── Plain public pages Google asks for (home page + privacy policy) ─────
+  if (parsed.pathname === '/' || parsed.pathname === '/privacy') {
+    const page = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.6;color:#1a1a1a}h1{font-size:1.5rem}</style></head><body>${body}</body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    if (parsed.pathname === '/') {
+      res.end(page('Knox', `<h1>Knox</h1><p>Knox is a private, personal companion project. It isn't a public service and has no other users.</p><p><a href="/privacy">Privacy policy</a></p>`));
+    } else {
+      res.end(page('Knox — Privacy policy', `<h1>Privacy policy</h1>
+<p>Knox is a private, personal project used by one person. It is not offered to the public.</p>
+<p><b>What it accesses.</b> When its owner signs Knox's own Google account in, Knox can read and send email in that account, and read files that have been shared with that account on Google Drive.</p>
+<p><b>Whose email it reads.</b> Knox only opens email sent from its owner's own address(es). Email from anyone else is left unread and is not opened or stored. Knox only sends email to its owner.</p>
+<p><b>Where data is kept.</b> Emails and shared files Knox reads are stored in the project's own private database so Knox can remember them. Nothing is sold, shared with third parties, or used for advertising.</p>
+<p><b>Removing access.</b> Access can be removed at any time from the Google account's security settings (third-party access).</p>`));
+    }
+    return;
+  }
+
   // ─── Knox's Google account (email + Drive): one-time sign-in ─────────────
   if (parsed.pathname === '/login/google') {
     if (!google.configured()) { res.writeHead(500); res.end('Google settings are missing on Knox-bot (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI).'); return; }
