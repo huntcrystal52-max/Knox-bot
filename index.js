@@ -121,6 +121,7 @@ const linkBackfill = require('./knox-link-backfill');
 const reach = require('./knox-reach');
 const chess = require('./knox-chess');
 const games = require('./knox-games');
+const gif = require('./knox-gif');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -984,7 +985,7 @@ async function getRecentEmotionalState() {
 
 async function saveEmotionalState(knoxEmotion, intensity, eliraObserved, trigger, conversationNote, expressed) {
   await supabase.from('emotional_state').insert([{ knox_emotion: knoxEmotion, intensity, elira_observed: eliraObserved, trigger: trigger || null, conversation_note: conversationNote || null, expressed: expressed || false, created_at: new Date().toISOString() }]);
-  console.log(`[Knox][EMOTIONAL] ${knoxEmotion} (depth: ${intensity}) — Elira: ${eliraObserved}`);
+  console.log(`[Knox][EMOTIONAL] ${knoxEmotion} (depth: ${Math.round(Number(intensity) * 100) / 100}) — Elira: ${eliraObserved}`);
 }
 
 function analyseEmotionalMoment(eliraMessage, knoxResponse, previousEmotion) {
@@ -1449,7 +1450,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   // The reach: what he actually holds for this reply, and his mark for reaching.
   let reachNote = '';
   try { reachNote = await reach.promptNote(semanticContext); } catch (e) {}
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -1485,10 +1486,10 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   const reactMatch = responseText.match(/\[REACT:(.+?)\]/);
   if (reactMatch) {
     const reactEmoji = reactMatch[1].trim();
-    const cleanText = responseText.replace(/\[REACT:.+?\]/, '').trim();
+    const cleanText = await gif.attachGif(responseText.replace(/\[REACT:.+?\]/, '').trim());
     return { text: cleanText || null, slept: false, mode: 'speak', reactEmoji };
   }
-  return { text: responseText, slept: false, mode: 'speak' };
+  return { text: await gif.attachGif(responseText), slept: false, mode: 'speak' };
 }
 
 // ─── IMAGE VISION ─────────────────────────────────────────────────────────────
@@ -1732,6 +1733,12 @@ async function handleImageMessage(message, text, moodState, previousEmotionalSta
 // ─── UTILS ────────────────────────────────────────────────────────────────────
 
 function sendLongMessage(channel, text, originalMessage) {
+  // A GIF he chose goes out as its own link after his words, so Discord shows it.
+  const split = gif.splitForDiscord(text);
+  if (split.urls.length) {
+    const send = split.words ? sendLongMessage(channel, split.words, originalMessage) : Promise.resolve();
+    return send.then(() => Promise.all(split.urls.map(u => channel.send(u))));
+  }
   if (text.length <= 1900) return originalMessage.reply(text);
   var start = 0; var promises = [];
   while (start < text.length) {
