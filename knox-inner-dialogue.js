@@ -719,6 +719,21 @@ async function runInnerDialogue(discord, supabase) {
       action_taken: inner.action_taken || null, chose_stillness: inner.chose_stillness || false, created_at: new Date().toISOString()
     }]);
 
+    // Sometimes the model hands back the content as a bundle (e.g. an email
+    // as {subject, body}) instead of plain text. Unwrap it, so nothing ever
+    // goes out as "[object Object]".
+    if (inner.action_content && typeof inner.action_content === 'object') {
+      const c = inner.action_content;
+      if (Array.isArray(c)) inner.action_content = c.map(x => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n\n');
+      else {
+        if (!inner.work_title && typeof c.subject === 'string') inner.work_title = c.subject;
+        if (!inner.work_title && typeof c.title === 'string') inner.work_title = c.title;
+        const main = ['body', 'text', 'content', 'letter', 'message', 'note', 'entry'].map(k => c[k]).find(v => typeof v === 'string' && v.trim());
+        inner.action_content = main || Object.entries(c).filter(([k, v]) => typeof v === 'string' && !['subject', 'title'].includes(k)).map(([, v]) => v).join('\n\n');
+      }
+    }
+    if (inner.action_content != null && typeof inner.action_content !== 'string') inner.action_content = String(inner.action_content);
+
     // "write" is one choice to him; underneath, finishing now posts it and
     // leaving it for later saves it as unfinished work.
     let actionType = String(inner.action_type || 'none').trim();

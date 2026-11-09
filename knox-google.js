@@ -180,6 +180,10 @@ async function markRead(id) {
 
 // Sends an email — only ever to her. `replyTo` = the email being answered.
 async function send({ subject, body, replyTo }) {
+  // Only real text goes out — never "[object Object]" or an empty letter.
+  if (body && typeof body === 'object') body = body.body || body.text || body.content || '';
+  body = String(body || '').trim();
+  if (!body || body === '[object Object]') { console.log('[Knox][GOOGLE] Not sending — the email had no readable text.'); return null; }
   const to = replyTo ? replyTo.from : eliraEmails()[0];
   if (!to || !eliraEmails().includes(String(to).toLowerCase())) { console.log('[Knox][GOOGLE] Refused to send — not her address.'); return null; }
   const st = await status();
