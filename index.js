@@ -269,6 +269,12 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
 
         // ── She sent a photo in the conversation: he looks at it first.
         let forKnox = message;
+        const herGif = !imageUrl ? gif.fromHer(message) : null;
+        if (herGif) {
+          const seen = herGif.imageUrl ? await requestImageDescription(herGif.imageUrl) : null;
+          forKnox = `Elira sent you a GIF${herGif.words ? ` ("${herGif.words}")` : ''}.${seen ? ` A still from it shows: ${seen}` : ''}${herGif.rest ? `\n\nShe also said: ${herGif.rest}` : ''}\n\nIt's a GIF — react to the feeling of it, as yourself.`;
+          // The message itself stays as-is, so the GIF shows in Home.
+        }
         if (imageUrl) {
           const seen = await requestImageDescription(imageUrl);
           if (!seen) {
@@ -595,6 +601,28 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
   // reflect unprompted (prompt omitted). This never applies, commits, or
   // deploys anything — it only writes a row to self_proposals for her to
   // read and decide on.
+  // ─── INTERNAL: GIF search for her picker in the app ─────────────────────
+  if (parsed.pathname === '/internal/gif-search' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const { query } = JSON.parse(body || '{}');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ enabled: gif.enabled(), results: await gif.searchMany(query, 18) }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
+
   // ─── INTERNAL: The library, for the Flame app ───────────────────────────
   // One endpoint, an "action" in the body. Uploaded files arrive as base64.
   if (parsed.pathname === '/internal/library' && req.method === 'POST') {
@@ -1807,20 +1835,25 @@ async function generateImageReaction(imageUrl, caption) {
   }
 }
 
-async function handleImageMessage(message, text, moodState, previousEmotionalState) {
-  const imageUrl = message.attachments.first().url;
-  console.log('[Knox][VISION] Image received, requesting description...');
+async function handleImageMessage(message, text, moodState, previousEmotionalState, opts) {
+  // opts.gif = { words, imageUrl } when she sent a GIF rather than a photo.
+  const g = opts && opts.gif;
+  const imageUrl = g ? g.imageUrl : message.attachments.first().url;
+  console.log(`[Knox][VISION] ${g ? 'GIF' : 'Image'} received, requesting description...`);
   try {
-    const imageDescription = await requestImageDescription(imageUrl);
-    if (!imageDescription) {
+    let imageDescription = imageUrl ? await requestImageDescription(imageUrl) : null;
+    if (!imageDescription && !(g && g.words)) {
       console.log('[Knox][VISION] All vision models failed or were unavailable.');
       return false;
     }
     console.log('[Knox][VISION] Generating response...');
     const history = await getMemories();
-    const knoxPrompt = `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
+    const knoxPrompt = g
+      ? `Elira sent you a GIF${g.words ? ` ("${g.words}")` : ''}.${imageDescription ? ` A still from it shows: ${imageDescription}` : ''}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would — it's a GIF, so react to the feeling of it.`
+      : `Elira sent you an image. Here is what it shows: ${imageDescription}${text ? `\n\nShe also said: ${text}` : ''}\n\nRespond as Knox naturally would.`;
+    if (!imageDescription) imageDescription = `a GIF: ${g.words}`;
     const result = await getResponse(knoxPrompt, history, moodState, previousEmotionalState);
-    if (result.text) { saveMemory('assistant', `[What I saw in the photo she sent: ${imageDescription.slice(0, 800)}]`, 'surface', 0.9, 'vision', null).then(m => m && neo4jMemory.createMemoryNode({ id: String(m.id), content: `[What I saw in the photo she sent: ${imageDescription}]`, role: 'assistant', createdAt: m.created_at })).catch(() => {}); await saveMemory('user', `[Image sent] ${text || ''}`, 'surface', 1.0, null, null); await saveMemory('assistant', result.text, 'surface', 1.0, null, null); await sendLongMessage(message.channel, result.text, message); return true; }
+    if (result.text) { saveMemory('assistant', `[What I saw in the ${g ? 'GIF' : 'photo'} she sent: ${imageDescription.slice(0, 800)}]`, 'surface', 0.9, 'vision', null).then(m => m && neo4jMemory.createMemoryNode({ id: String(m.id), content: `[What I saw in the ${g ? 'GIF' : 'photo'} she sent: ${imageDescription}]`, role: 'assistant', createdAt: m.created_at })).catch(() => {}); await saveMemory('user', `${g ? `[GIF sent: ${g.words || 'a GIF'}]` : '[Image sent]'} ${text || ''}`, 'surface', 1.0, null, null); await saveMemory('assistant', result.text, 'surface', 1.0, null, null); await sendLongMessage(message.channel, result.text, message); return true; }
     console.log('[Knox][VISION] getResponse returned no text.');
   } catch (e) { console.log('[Knox][VISION] Error:', e.message); }
   return false;
@@ -1989,6 +2022,22 @@ discord.on('messageCreate', async function(message) {
   const previousEmotionalState = await getRecentEmotionalState();
   const previousEmotion = previousEmotionalState ? previousEmotionalState.knox_emotion : 'anchored';
   const hasPdfAttachment = !!findBookAttachment(message);
+
+  // A GIF from Discord's picker arrives as a Tenor/GIPHY link. Discord adds
+  // the preview a moment later, so wait briefly for it, then let him see it.
+  const herGif = message.attachments.size === 0 ? gif.fromHer(text) : null;
+  if (herGif) {
+    await message.channel.sendTyping();
+    let still = herGif.imageUrl;
+    if (!still) {
+      let embeds = message.embeds;
+      if (!embeds || !embeds.length) { await new Promise(r => setTimeout(r, 2000)); try { embeds = (await message.fetch(true)).embeds; } catch (e) {} }
+      const em = embeds && embeds[0];
+      still = em ? ((em.thumbnail && em.thumbnail.url) || (em.image && em.image.url) || null) : null;
+    }
+    const handled = await handleImageMessage(message, herGif.rest, moodState, previousEmotionalState, { gif: { words: herGif.words, imageUrl: still } });
+    if (handled) return;
+  }
 
   if (message.attachments.size > 0 && !hasPdfAttachment) {
     await message.channel.sendTyping();
