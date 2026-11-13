@@ -47,17 +47,54 @@ async function getText(url, opts) {
 
 // ── The video's details and caption list ────────────────────────────────────
 
-// YouTube's own app API (the Android app's door) — usually the most reliable.
-async function playerFromApp(id) {
+// YouTube's own app API. It has several "doors" (the Android app, the iPhone
+// app, the TV player) — YouTube sometimes blocks one for servers but not
+// another, so he tries each in turn.
+const CLIENTS = [
+  { name: 'Android', ua: 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip', client: { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30 } },
+  { name: 'iPhone', ua: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)', client: { clientName: 'IOS', clientVersion: '20.10.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.3.2.22D82' } },
+  { name: 'TV', ua: 'Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko)', client: { clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER', clientVersion: '2.0' }, thirdParty: { embedUrl: 'https://www.youtube.com/' } }
+];
+async function playerFromApp(id, c) {
   try {
+    const context = { client: Object.assign({ hl: 'en', gl: 'GB' }, c.client) };
+    if (c.thirdParty) context.thirdParty = c.thirdParty;
     const r = await getText('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip' },
-      body: JSON.stringify({ videoId: id, context: { client: { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30, hl: 'en', gl: 'GB' } } })
+      headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua },
+      body: JSON.stringify({ videoId: id, context })
     });
-    if (!r.ok) { console.log('[Knox][YOUTUBE] App API status', r.status); return null; }
+    if (!r.ok) { console.log(`[Knox][YOUTUBE] ${c.name} door: status ${r.status}`); return null; }
     return JSON.parse(r.text);
-  } catch (e) { console.log('[Knox][YOUTUBE] App API error:', e.message); return null; }
+  } catch (e) { console.log(`[Knox][YOUTUBE] ${c.name} door error:`, e.message); return null; }
+}
+
+// Backup: Supadata, a transcript service that fetches captions for him when
+// YouTube blocks Railway. Only used if SUPADATA_API_KEY is set (free tier).
+async function transcriptFromSupadata(id) {
+  const key = (process.env.SUPADATA_API_KEY || '').trim();
+  if (!key) return '';
+  try {
+    const headers = { 'x-api-key': key };
+    let res = await fetch(`https://api.supadata.ai/v1/transcript?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + id)}&mode=native&lang=en`, { headers, timeout: 30000 });
+    let data = await res.json().catch(() => ({}));
+    if (res.status === 202 && data.jobId) { // a long video — wait for it (up to ~40s)
+      for (let i = 0; i < 8; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        data = await (await fetch(`https://api.supadata.ai/v1/transcript/${data.jobId}`, { headers, timeout: 15000 })).json().catch(() => ({}));
+        if (data.status === 'completed' || data.status === 'failed') break;
+      }
+    } else if (!res.ok) { console.log('[Knox][YOUTUBE] Supadata:', res.status, String(data.message || data.error || '').slice(0, 150)); return ''; }
+    if (!Array.isArray(data.content)) return typeof data.content === 'string' ? data.content : '';
+    let out = ''; let lastMark = -999;
+    for (const c of data.content) {
+      const s = (c.offset || 0) / 1000; const t = decode(decode(c.text)).replace(/\s+/g, ' ').trim();
+      if (!t) continue;
+      if (s - lastMark >= 60) { out += `${out ? '\n' : ''}[${clock(s)}] `; lastMark = s; }
+      out += t + ' ';
+    }
+    return out.trim();
+  } catch (e) { console.log('[Knox][YOUTUBE] Supadata error:', e.message); return ''; }
 }
 
 // The normal web page, as a backup.
@@ -119,19 +156,36 @@ async function fetchTranscript(track) {
 // The video's details plus its transcript: { player, transcript, note }.
 async function transcriptFor(id) {
   const ok = (p) => !!(p && p.playabilityStatus && p.playabilityStatus.status === 'OK');
-  let player = await playerFromApp(id);
-  if (!pickTrack(player)) {
-    if (player && !ok(player)) console.log('[Knox][YOUTUBE] App API said:', player.playabilityStatus && player.playabilityStatus.status, String((player.playabilityStatus || {}).reason || '').slice(0, 120));
-    const page = await playerFromPage(id);
-    if (page && (pickTrack(page) || !player || !player.videoDetails)) player = page;
+  let player = null, details = null;
+  for (const c of CLIENTS) {
+    const p = await playerFromApp(id, c);
+    if (p && p.videoDetails && !details) details = p.videoDetails;
+    if (pickTrack(p) || ok(p)) { player = p; break; }
+    if (p) console.log(`[Knox][YOUTUBE] ${c.name} door said:`, (p.playabilityStatus || {}).status, String((p.playabilityStatus || {}).reason || '').slice(0, 100));
   }
+  if (!pickTrack(player)) {
+    const page = await playerFromPage(id);
+    if (page && (pickTrack(page) || ok(page))) player = page;
+  }
+  if (player && !player.videoDetails && details) player.videoDetails = details;
+  if (!player && details) player = { videoDetails: details };
+
   const track = pickTrack(player);
-  const transcript = track ? await fetchTranscript(track) : '';
+  let transcript = track ? await fetchTranscript(track) : '';
   let note;
   if (transcript) note = track.kind === 'asr' ? 'automatic captions — may have a few mis-heard words' : 'captions';
-  else if (track) note = 'YouTube wouldn\'t hand over the captions this time';
-  else if (ok(player)) note = 'this video has no captions';
-  else note = 'YouTube wouldn\'t let you in to get the transcript this time';
+  else {
+    // YouTube said no (or wouldn't hand them over) — try the backup service.
+    if (!ok(player) || track) {
+      transcript = await transcriptFromSupadata(id);
+      if (transcript) { console.log('[Knox][YOUTUBE] Got the transcript through Supadata.'); note = 'captions'; }
+    }
+    if (!note) {
+      if (track) note = 'YouTube wouldn\'t hand over the captions this time';
+      else if (ok(player)) note = 'this video has no captions — lyric and music videos often don\'t (the words are part of the picture)';
+      else note = 'YouTube wouldn\'t let you in to get the transcript this time';
+    }
+  }
   return { player, transcript, note };
 }
 
