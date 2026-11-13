@@ -83,7 +83,22 @@ async function transcribe(clip) {
 const TONE_ASK = 'This is a voice note from a woman to her partner. Listen to HOW she speaks, not what she says. In one to three short sentences, describe her voice: tone, energy, warmth, pace, pauses, laughter or smiling, whether she sounds tired, happy, upset, tearful, playful, quiet, excited. Do not repeat her words. If it is hard to tell, say so plainly rather than guessing.';
 
 async function toneFromGoogle(clip, toneModel) {
-  const name = toneModel.replace(/^google\//, '');
+  let name = toneModel.replace(/^google\//, '');
+  let { res, d } = await askGoogle(clip, name);
+  // Google retires models; when it names the replacement, use that instead.
+  const moved = res.status === 404 && String(((d.error || {}).message) || '').match(/use (?:models\/)?(gemini-[a-z0-9.-]+)/i);
+  if (moved) {
+    console.log(`[Knox][VOICE] Google retired ${name} — using ${moved[1]} instead.`);
+    name = moved[1];
+    ({ res, d } = await askGoogle(clip, name));
+  }
+  const parts = (((d.candidates || [])[0] || {}).content || {}).parts || [];
+  const tone = parts.map(p => p.text || '').join(' ').trim();
+  if (!tone) console.log('[Knox][VOICE] Tone listening (Google) failed:', res.status, JSON.stringify(d).slice(0, 200));
+  return tone;
+}
+
+async function askGoogle(clip, name) {
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(name)}:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY.trim() },
@@ -93,16 +108,14 @@ async function toneFromGoogle(clip, toneModel) {
     ] }] })
   });
   const d = await res.json().catch(() => ({}));
-  const parts = (((d.candidates || [])[0] || {}).content || {}).parts || [];
-  const tone = parts.map(p => p.text || '').join(' ').trim();
-  if (!tone) console.log('[Knox][VOICE] Tone listening (Google) failed:', res.status, JSON.stringify(d).slice(0, 200));
-  return tone;
+  return { res, d };
 }
 
 const TONE_FORMATS = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/m4a': 'm4a', 'audio/x-m4a': 'm4a', 'audio/aac': 'aac', 'audio/ogg': 'ogg', 'audio/flac': 'flac' };
 async function hearTone(clip) {
-  const toneModel = (process.env.VOICE_TONE_MODEL || 'google/gemini-2.5-flash').trim();
-  const viaGoogle = !!(process.env.GEMINI_API_KEY || '').trim() && /gemini/i.test(toneModel);
+  const hasGoogle = !!(process.env.GEMINI_API_KEY || '').trim();
+  const toneModel = (process.env.VOICE_TONE_MODEL || (hasGoogle ? 'gemini-3.8-flash' : 'google/gemini-2.5-flash')).trim();
+  const viaGoogle = hasGoogle && /gemini/i.test(toneModel);
   if (!clip || toneModel === 'off' || (!viaGoogle && !process.env.OPENROUTER_API_KEY)) return null;
   if (clip.tone) return clip.tone;
   const format = TONE_FORMATS[String(clip.mime).split(';')[0].toLowerCase()];
