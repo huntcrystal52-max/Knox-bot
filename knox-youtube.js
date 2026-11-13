@@ -281,7 +281,7 @@ async function promptNote(userMessage, helpers) {
       };
     }
     // No link, but she's talking about a video from the last couple of days.
-    if (/\b(video|youtube|clip|vid)\b/i.test(m)) {
+    if (!/^Elira sent you a video\./.test(m) && /\b(video|youtube|clip|vid)\b/i.test(m)) {
       const r = await pgPool.query(`SELECT * FROM youtube_videos WHERE seen_at > NOW() - INTERVAL '2 days' ORDER BY seen_at DESC LIMIT 1`);
       if (r.rows[0]) return { note: `\n\n═══ THE LAST YOUTUBE VIDEO ELIRA SENT YOU ═══\n${describe(r.rows[0], 7000)}`, fresh: [] };
     }

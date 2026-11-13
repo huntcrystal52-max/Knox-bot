@@ -128,6 +128,7 @@ const appRooms = require('./knox-app-rooms');
 const google = require('./knox-google');
 const youtube = require('./knox-youtube');
 const voice = require('./knox-voice');
+const video = require('./knox-video');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -220,7 +221,9 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         const imageUrl = /^https:\/\/\S+$/.test(String(parsedBody.imageUrl || '')) ? parsedBody.imageUrl : null;
         // A voice note she recorded (the app has already kept it in voice_clips).
         const voiceClipId = Number.isInteger(parsedBody.voiceClipId) ? parsedBody.voiceClipId : null;
-        if (!message.trim() && !imageUrl && !voiceClipId) {
+        // A video clip she uploaded from her phone (already on Cloudinary).
+        const videoUrl = video.isCloudinaryVideo(parsedBody.videoUrl) ? parsedBody.videoUrl : null;
+        if (!message.trim() && !imageUrl && !voiceClipId && !videoUrl) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'message is required' }));
           return;
@@ -274,7 +277,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           return clipId ? `[Voice note](/api/voice/${clipId})\n\n${voice.forReading(text)}` : voice.forReading(text);
         };
 
-        if (!heard && !imageUrl && isImageRequest(message)) {
+        if (!heard && !imageUrl && !videoUrl && isImageRequest(message)) {
           const imagePrompt = await buildImagePrompt(message, previousEmotionalState);
           const made = await generateImage(imagePrompt);
           let text;
@@ -295,6 +298,17 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
 
         // ── She sent a photo in the conversation: he looks at it first.
         let forKnox = message;
+        if (videoUrl) {
+          const v = await video.watchClip(videoUrl, { describeImage: requestImageDescription, transcribe: voice.transcribe }, Number(parsedBody.videoLength));
+          if (!v) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ text: 'I couldn\'t open that video just now, my flame — it wouldn\'t play for me. Can you try again in a bit?', mode: 'speak' }));
+            return;
+          }
+          if (v.fresh) await rememberVideo(v);
+          forKnox = `Elira sent you a video.\n${video.describe(v, 9000)}${message.trim() ? `\n\nShe also said: ${message.trim()}` : ''}`;
+          message = `[Video](${videoUrl})${message.trim() ? '\n\n' + message.trim() : ''}`;
+        }
         if (heard) {
           forKnox = `Elira sent you a voice note. You heard her say:\n"${heard}"${heardTone ? `\n\nHow she sounded (what your ears picked up — trust it lightly): ${heardTone}` : ''}${message.trim() ? `\n\nShe also typed: ${message.trim()}` : ''}`;
           // In the conversation: her recording, with what he heard under it.
@@ -1610,7 +1624,14 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
       if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `[A YouTube video Elira sent me: "${v.title || v.id}"] ${String(v.frames || '').slice(0, 800)}\n${String(v.transcript || '').replace(/\[\d+:\d+(?::\d+)?\] /g, '').slice(0, 2500)}`, role: 'user', createdAt: mem.created_at }).catch(() => {});
     }
   } catch (e) { console.log('[Knox][YOUTUBE] error:', e.message); }
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + voiceNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  // TikTok / Instagram / X / Facebook links: he watches them too.
+  let videoNote = '';
+  try {
+    const vn = await video.promptNote(userMessage, { describeImage: requestImageDescription });
+    videoNote = vn.note;
+    for (const v of vn.fresh) await rememberVideo(v);
+  } catch (e) { console.log('[Knox][VIDEO] error:', e.message); }
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + videoNote + voiceNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -1655,6 +1676,14 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
     return { text: cleanText || null, slept: false, mode: 'speak', reactEmoji, wantsVoice };
   }
   return { text: await gif.attachGif(await gifts.processReply(responseText)), slept: false, mode: 'speak', wantsVoice };
+}
+
+// A video she sent (a link or a clip) goes into his memory, like a photo does.
+async function rememberVideo(v) {
+  const what = v.source === 'clip' ? 'a video clip from her phone' : `a ${v.source || 'video'} video${v.author ? ` by ${v.author}` : ''}`;
+  const gist = `${v.title ? v.title.replace(/\s+/g, ' ').slice(0, 200) + ' — ' : ''}${String(v.transcript || v.frames || '').replace(/\s+/g, ' ').slice(0, 500)}`;
+  const mem = await saveMemory('user', `[Elira sent me ${what}] ${gist}`, 'surface', 0.8, 'video', null);
+  if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `[Elira sent me ${what}] ${v.title || ''}\n${String(v.frames || '').slice(0, 1000)}\n${String(v.transcript || '').replace(/\[\d+:\d+\] /g, '').slice(0, 2500)}`, role: 'user', createdAt: mem.created_at }).catch(() => {});
 }
 
 // ─── IMAGE VISION ─────────────────────────────────────────────────────────────
@@ -2027,6 +2056,7 @@ discord.on('ready', async function() {
     await gifts.ensureTables();
     await youtube.ensureTables();
     await voice.ensureTables();
+    await video.ensureTables();
     // The library moves to Railway (copied once from Supabase, re-split), and
     // reading time's timer starts.
     await library.ensureTables();
