@@ -126,6 +126,7 @@ const gifts = require('./knox-gifts');
 const library = require('./knox-library');
 const appRooms = require('./knox-app-rooms');
 const google = require('./knox-google');
+const youtube = require('./knox-youtube');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -1563,7 +1564,17 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   let driveNote = '';
   try { driveNote = await google.promptNote(userMessage); } catch (e) {}
   try { driveNote = (await google.emailsNote()) + driveNote; } catch (e) {}
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  // YouTube links: he reads the transcript and looks at stills from the video.
+  let youtubeNote = '';
+  try {
+    const yt = await youtube.promptNote(userMessage, { describeImage: requestImageDescription });
+    youtubeNote = yt.note;
+    for (const v of yt.fresh) {
+      const mem = await saveMemory('user', `[Elira sent me a YouTube video: "${v.title || v.id}"${v.channel ? ` by ${v.channel}` : ''}] ${String(v.transcript || v.frames || '').replace(/\s+/g, ' ').slice(0, 600)}`, 'surface', 0.8, 'video', null);
+      if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `[A YouTube video Elira sent me: "${v.title || v.id}"] ${String(v.frames || '').slice(0, 800)}\n${String(v.transcript || '').replace(/\[\d+:\d+(?::\d+)?\] /g, '').slice(0, 2500)}`, role: 'user', createdAt: mem.created_at }).catch(() => {});
+    }
+  } catch (e) { console.log('[Knox][YOUTUBE] error:', e.message); }
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -1973,6 +1984,7 @@ discord.on('ready', async function() {
     integrity.init({ systemPrompt: SYSTEM_PROMPT, discord });
     await reach.ensureTables();
     await gifts.ensureTables();
+    await youtube.ensureTables();
     // The library moves to Railway (copied once from Supabase, re-split), and
     // reading time's timer starts.
     await library.ensureTables();
