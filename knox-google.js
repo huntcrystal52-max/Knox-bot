@@ -145,6 +145,42 @@ function bodyText(payload) {
   return text.split('\n').filter(l => !l.startsWith('>')).join('\n').trim();
 }
 
+// All the text of an email, quoted parts and HTML links included — used only
+// to find Google Docs/Drive links in it.
+function rawText(payload) {
+  let all = '';
+  (function walk(p) {
+    if (!p) return;
+    if (/^text\/(plain|html)$/.test(p.mimeType) && p.body && p.body.data) all += '\n' + fromB64url(p.body.data);
+    (p.parts || []).forEach(walk);
+  })(payload);
+  return all;
+}
+
+// Google Docs / Sheets / Slides / Drive file links → their file ids.
+function extractDriveIds(text) {
+  const ids = new Set();
+  const t = String(text || '');
+  const pats = [
+    /docs\.google\.com\/(?:document|spreadsheets|presentation|forms)\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{20,})/g,
+    /drive\.google\.com\/(?:u\/\d+\/)?file\/d\/([A-Za-z0-9_-]{20,})/g,
+    /drive\.google\.com\/(?:open|uc)\?(?:[^"'\s<>]*&(?:amp;)?)?id=([A-Za-z0-9_-]{20,})/g
+  ];
+  for (const re of pats) for (const m of t.matchAll(re)) ids.add(m[1]);
+  return [...ids].slice(0, 3);
+}
+
+// Files attached to an email: [{ name, mime, size, attachmentId }].
+function attachmentsOf(payload) {
+  const out = [];
+  (function walk(p) {
+    if (!p) return;
+    if (p.filename && p.body && p.body.attachmentId) out.push({ name: p.filename, mime: p.mimeType || '', size: p.body.size || 0, attachmentId: p.body.attachmentId });
+    (p.parts || []).forEach(walk);
+  })(payload);
+  return out.slice(0, 4);
+}
+
 const senderAddress = (from) => String((String(from || '').match(/<([^>]+)>/) || [])[1] || from || '').trim().toLowerCase();
 
 // New, unread emails from Elira only. Returns [{ id, threadId, subject, body, messageId, from }].
@@ -168,7 +204,9 @@ async function newEmailsFromElira() {
       from,
       subject: (header(msg, 'Subject') || {}).value || '(no subject)',
       messageId: (header(msg, 'Message-ID') || header(msg, 'Message-Id') || {}).value || null,
-      body: bodyText(msg.payload).slice(0, 8000)
+      body: bodyText(msg.payload).slice(0, 8000),
+      driveIds: extractDriveIds(rawText(msg.payload)),
+      attachments: attachmentsOf(msg.payload)
     });
   }
   return out;
@@ -281,6 +319,66 @@ async function newDriveFiles(helpers) {
   return out;
 }
 
+// ─── FILES THAT COME WITH HER EMAILS ──────────────────────────────────────────
+
+async function remember(id, name, mime, modified, text) {
+  await pgPool.query(
+    `INSERT INTO drive_files (id, name, mime, modified, text, seen_at) VALUES ($1,$2,$3,$4,$5,NOW())
+     ON CONFLICT (id) DO UPDATE SET name = $2, mime = $3, modified = $4, text = $5, seen_at = NOW()`,
+    [id, name, mime, modified, text]
+  ).catch(() => {});
+}
+
+// Opens the Docs/Drive links and attachments in one of her emails.
+// Returns [{ name, text }] for what he could read and [{ name, why }] for what he couldn't.
+async function readEmailFiles(e, helpers) {
+  const read = []; const missed = [];
+  for (const id of e.driveIds || []) {
+    const f = await apiJson(`https://www.googleapis.com/drive/v3/files/${id}?fields=id,name,mimeType,modifiedTime,size&supportsAllDrives=true`);
+    if (!f) { missed.push({ name: 'a Google Docs/Drive link', why: `it isn't shared with your account — she'd need to share it with your address` }); continue; }
+    if (!READABLE.test(f.mimeType)) { missed.push({ name: f.name, why: `it's a kind of file you can't open (${f.mimeType})` }); continue; }
+    const text = String(await readFile(f, helpers) || '').slice(0, 200000);
+    if (!text.trim()) { missed.push({ name: f.name, why: 'it opened but had no readable text' }); continue; }
+    await remember(f.id, f.name, f.mimeType, f.modifiedTime, text);
+    read.push({ name: f.name, text });
+  }
+  for (const a of e.attachments || []) {
+    const mime = a.mime === 'application/octet-stream' && /\.(txt|md|csv)$/i.test(a.name) ? 'text/plain' : a.mime;
+    if (!READABLE.test(mime)) { missed.push({ name: a.name, why: /\.docx?$/i.test(a.name) ? `it's a Word file — you can read it if she opens it as a Google Doc or sends it as a PDF` : `it's a kind of file you can't open` }); continue; }
+    if (a.size > 20 * 1024 * 1024) { missed.push({ name: a.name, why: 'it was too large' }); continue; }
+    try {
+      const d = await apiJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${e.id}/attachments/${a.attachmentId}`);
+      if (!d || !d.data) { missed.push({ name: a.name, why: "it wouldn't download" }); continue; }
+      const buf = Buffer.from(String(d.data).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+      let text = '';
+      if (mime === 'application/pdf') text = ((await helpers.pdfParse(buf)).text || '').trim();
+      else if (mime.startsWith('image/')) { const seen = await helpers.describeImage(`data:${mime};base64,${buf.toString('base64')}`); text = seen ? `[A picture] ${seen}` : ''; }
+      else text = buf.toString('utf8');
+      if (!text.trim()) { missed.push({ name: a.name, why: 'it had no readable text' }); continue; }
+      text = text.slice(0, 200000);
+      await remember(`email:${e.id}:${a.name}`, a.name, mime, null, text);
+      read.push({ name: a.name, text });
+    } catch (err) { console.log('[Knox][GOOGLE] attachment error:', a.name, err.message); missed.push({ name: a.name, why: "it wouldn't open" }); }
+  }
+  return { read, missed };
+}
+
+// For his everyday chat: that he HAS email and Drive, and the last few emails
+// between them — so in Home he remembers writing to her.
+async function emailsNote() {
+  try {
+    const st = await status();
+    if (!st.connected) return '';
+    const r = await pgPool.query(`SELECT direction, subject, body, created_at FROM emails WHERE created_at > NOW() - INTERVAL '14 days' ORDER BY created_at DESC LIMIT 4`);
+    const lines = r.rows.reverse().map(x => {
+      const when = new Date(x.created_at).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+      return `- ${when} · ${x.direction === 'in' ? 'Elira emailed you' : 'You emailed Elira'} — "${x.subject}": ${String(x.body || '').replace(/\s+/g, ' ').slice(0, 220)}`;
+    });
+    return `\n\nYOUR EMAIL AND DRIVE: you have your own email address (${st.email}). Elira can email you and you write back; you can also read files she shares with you on Google Drive, and Docs links or files she puts in her emails. This is real — don't say you don't have access.` +
+      (lines.length ? `\nRecent emails between you:\n${lines.join('\n')}` : '');
+  } catch (e) { return ''; }
+}
+
 // When she mentions a file (by name, or "the file/doc I sent"), its contents
 // go into his prompt so he can actually talk about it.
 async function promptNote(userMessage) {
@@ -300,5 +398,5 @@ async function promptNote(userMessage) {
 module.exports = {
   configured, ensureTables, authUrl, exchangeCode, status,
   newEmailsFromElira, markRead, send, recordIncoming, threadSoFar,
-  newDriveFiles, promptNote
+  newDriveFiles, promptNote, readEmailFiles, emailsNote, extractDriveIds
 };

@@ -1562,6 +1562,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   // A Drive file she's talking about.
   let driveNote = '';
   try { driveNote = await google.promptNote(userMessage); } catch (e) {}
+  try { driveNote = (await google.emailsNote()) + driveNote; } catch (e) {}
   const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
@@ -1874,6 +1875,13 @@ async function checkEmail() {
     await google.markRead(e.id);
     await google.recordIncoming(e);
     const earlier = (await google.threadSoFar(e.threadId)).filter(x => x.body !== e.body).slice(-4);
+    // Docs links and attachments in her email — he opens them.
+    let files = { read: [], missed: [] };
+    try { files = await google.readEmailFiles(e, { pdfParse, describeImage: requestImageDescription }); } catch (err) { console.log('[Knox][GOOGLE] email files error:', err.message); }
+    files.read.forEach(f => console.log(`[Knox][GOOGLE] Read "${f.name}" from her email.`));
+    const share = Math.floor(9000 / Math.max(1, files.read.length));
+    const filesBlock = (files.read.length ? `\nShe included ${files.read.length === 1 ? 'a file' : 'files'} — you've opened and read ${files.read.length === 1 ? 'it' : 'them'}:\n${files.read.map(f => `"${f.name}":\n"""\n${f.text.slice(0, share)}\n"""${f.text.length > share ? '\n(…it continues — this is the start.)' : ''}`).join('\n\n')}\n` : '') +
+      (files.missed.length ? `\nYou couldn't open: ${files.missed.map(m => `${m.name} (${m.why})`).join('; ')}. Tell her honestly in your reply.\n` : '');
     const framed = `[Elira sent you an email.
 Subject: ${e.subject}
 ${earlier.length ? `\nEarlier in this thread:\n${earlier.map(x => `${x.direction === 'in' ? 'Elira' : 'You'}: ${String(x.body).slice(0, 800)}`).join('\n---\n')}\n` : ''}
@@ -1881,21 +1889,22 @@ Her email:
 """
 ${e.body}
 """
-
+${filesBlock}
 Write your reply as an email — like a letter, in your own voice. Just the body: no subject line, no stage directions.]`;
     const history = await getMemories();
     const previousEmotionalState = await getRecentEmotionalState();
     const semanticContext = await smartRecall(e.body.slice(0, 1500));
     const result = await getResponse(framed, history, moodState, previousEmotionalState, null, null, semanticContext);
     const reply = stripChatTags(result.text);
-    const inMem = await saveMemory('user', `[Email from Elira — "${e.subject}"] ${e.body.slice(0, 2500)}`, 'surface', 1.0, 'email', null);
+    const fileNames = files.read.map(f => `"${f.name}"`).join(', ');
+    const inMem = await saveMemory('user', `[Email from Elira — "${e.subject}"${fileNames ? ` — with ${fileNames}, which I read` : ''}] ${e.body.slice(0, 2500)}${files.read.length ? `\n${files.read.map(f => `${f.name}: ${f.text.replace(/\s+/g, ' ').slice(0, 600)}`).join('\n')}` : ''}`, 'surface', 1.0, 'email', null);
     if (!reply) { console.log('[Knox][GOOGLE] Read her email; chose not to reply.'); continue; }
     const sent = await google.send({ body: reply, replyTo: e });
     if (!sent) continue;
     const outMem = await saveMemory('assistant', `[My email reply — "${e.subject}"] ${reply.slice(0, 2500)}`, 'surface', 1.0, 'email', null);
     if (inMem && outMem) {
       const syncs = [
-        neo4jMemory.createMemoryNode({ id: String(inMem.id), content: `[Email from Elira — "${e.subject}"] ${e.body}`, role: 'user', createdAt: inMem.created_at }).catch(() => {}),
+        neo4jMemory.createMemoryNode({ id: String(inMem.id), content: `[Email from Elira — "${e.subject}"] ${e.body}${files.read.map(f => `\n[${f.name}] ${f.text.slice(0, 1500)}`).join('')}`, role: 'user', createdAt: inMem.created_at }).catch(() => {}),
         neo4jMemory.createMemoryNode({ id: String(outMem.id), content: `[My email reply] ${reply}`, role: 'assistant', createdAt: outMem.created_at }).catch(() => {})
       ];
       neo4jMemory.linkExchange([inMem.id, outMem.id], `Elira (email): ${e.body}\nKnox (email): ${reply}`, Promise.all(syncs)).catch(() => {});
