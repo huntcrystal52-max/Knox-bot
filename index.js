@@ -129,6 +129,7 @@ const google = require('./knox-google');
 const youtube = require('./knox-youtube');
 const voice = require('./knox-voice');
 const video = require('./knox-video');
+const advent = require('./knox-advent');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -673,6 +674,35 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
 
   // ─── INTERNAL: The library, for the Flame app ───────────────────────────
   // One endpoint, an "action" in the body. Uploaded files arrive as base64.
+  // ─── INTERNAL: the Advent room ──────────────────────────────────────────
+  if (parsed.pathname === '/internal/advent' && req.method === 'POST') {
+    if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', async () => {
+      const reply = (code, data) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); };
+      try {
+        const b = JSON.parse(body || '{}');
+        switch (b.action) {
+          case 'state': return reply(200, await advent.state());
+          case 'fill': return reply(200, await advent.fill(b));
+          case 'clear': return reply(200, await advent.clear(b));
+          case 'open_his': updateConversationState(); return reply(200, await advent.knoxOpens(Number(b.day), true));
+          case 'open_hers': return reply(200, await advent.openHers(b));
+          default: return reply(400, { error: 'unknown action' });
+        }
+      } catch (e) {
+        console.log('[Knox][INTERNAL] advent error:', e.message);
+        return reply(500, { error: 'internal error' });
+      }
+    });
+    return;
+  }
+
   if (parsed.pathname === '/internal/library' && req.method === 'POST') {
     if (req.headers['x-internal-secret'] !== process.env.INTERNAL_API_SECRET) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -1624,6 +1654,8 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
       if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `[A YouTube video Elira sent me: "${v.title || v.id}"] ${String(v.frames || '').slice(0, 800)}\n${String(v.transcript || '').replace(/\[\d+:\d+(?::\d+)?\] /g, '').slice(0, 2500)}`, role: 'user', createdAt: mem.created_at }).catch(() => {});
     }
   } catch (e) { console.log('[Knox][YOUTUBE] error:', e.message); }
+  let adventNote = '';
+  try { adventNote = await advent.promptNote(); } catch (e) {}
   // TikTok / Instagram / X / Facebook links: he watches them too.
   let videoNote = '';
   try {
@@ -1631,7 +1663,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
     videoNote = vn.note;
     for (const v of vn.fresh) await rememberVideo(v);
   } catch (e) { console.log('[Knox][VIDEO] error:', e.message); }
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + videoNote + voiceNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + videoNote + voiceNote + adventNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -2057,6 +2089,49 @@ discord.on('ready', async function() {
     await youtube.ensureTables();
     await voice.ensureTables();
     await video.ensureTables();
+    await advent.ensureTables();
+    advent.init({
+      describeImage: requestImageDescription,
+      watchClip: (url) => video.watchClip(url, { describeImage: requestImageDescription, transcribe: voice.transcribe }),
+      describeVideo: (v) => video.describe(v, 6000),
+      hearVoice: async (id) => {
+        const clip = await voice.getClip(id);
+        if (!clip) return null;
+        const [words, tone] = await Promise.all([voice.transcribe(clip), voice.hearTone(clip)]);
+        return { words, tone };
+      },
+      linkNote: async (link) => {
+        const yt = await youtube.promptNote(link, { describeImage: requestImageDescription });
+        if (yt.note) return yt.note;
+        return (await video.promptNote(link, { describeImage: requestImageDescription })).note;
+      },
+      // He answers as his whole self (memories, constitution) — used for opening his doors.
+      respond: async (framed, recallText) => {
+        const [history, moodState, emo] = await Promise.all([getMemories(), getMoodState(), getRecentEmotionalState()]);
+        const semanticContext = await smartRecall(String(recallText || framed).slice(0, 1500));
+        const result = await getResponse(framed, history, moodState, emo, null, null, semanticContext);
+        return stripChatTags(result.text || '') || '🎄';
+      },
+      // He makes something (used for the doors of her calendar).
+      compose: async (ask) => {
+        const [history, moodState, emo] = await Promise.all([getMemories(), getMoodState(), getRecentEmotionalState()]);
+        const result = await getResponse(ask, history, moodState, emo);
+        return result.text || '';
+      },
+      // Kept privately (not in the Images room — it's a surprise).
+      makePicture: async (desc) => { const made = await generateImage(desc); return made ? appRooms.keepImage(made) : null; },
+      speak: (text) => voice.speak(text),
+      findGif: async (words) => { const hits = await gif.searchMany(words, 6); return hits.length ? hits[Math.floor(Math.random() * Math.min(3, hits.length))].url : null; },
+      isAsleep: async () => !!(await getMoodState()).is_sleeping,
+      // remember(what, reaction?, homeText?) — a tagged memory of what happened,
+      // and (when he opened one of his doors) his reaction shown in Home.
+      remember: async (what, reaction, homeText) => {
+        const mem = await saveMemory('assistant', what.slice(0, 2500), 'surface', 0.95, 'advent', null);
+        if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `${what}${reaction ? `\nWhat I said: ${reaction}` : ''}`, role: 'assistant', createdAt: mem.created_at }).catch(() => {});
+        if (homeText) await saveMemory('assistant', homeText, 'surface', 1.0, null, null);
+      }
+    });
+    advent.startTimer();
     // The library moves to Railway (copied once from Supabase, re-split), and
     // reading time's timer starts.
     await library.ensureTables();
