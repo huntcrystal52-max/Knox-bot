@@ -253,10 +253,12 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         // ── She asked him to make a picture: make it, show it in Home, and
         //    keep it in the app's Images room too.
         // ── She sent a voice note: he listens first.
-        let heard = null;
+        let heard = null, heardTone = null;
         if (voiceClipId) {
           const clip = await voice.getClip(voiceClipId);
-          heard = clip && clip.author === 'elira' ? await voice.transcribe(clip) : null;
+          let tone = null;
+          if (clip && clip.author === 'elira') [heard, tone] = await Promise.all([voice.transcribe(clip), voice.hearTone(clip)]);
+          heardTone = heard ? tone : null;
           if (!heard) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ text: voice.enabled() ? 'I couldn\'t quite hear that one, my flame — it didn\'t come through. Can you try again?' : 'I can\'t hear voice notes yet — my ears aren\'t switched on (ElevenLabs isn\'t set up on my side).', mode: 'speak' }));
@@ -294,7 +296,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         // ── She sent a photo in the conversation: he looks at it first.
         let forKnox = message;
         if (heard) {
-          forKnox = `Elira sent you a voice note. You heard her say:\n"${heard}"${message.trim() ? `\n\nShe also typed: ${message.trim()}` : ''}`;
+          forKnox = `Elira sent you a voice note. You heard her say:\n"${heard}"${heardTone ? `\n\nHow she sounded (what your ears picked up — trust it lightly): ${heardTone}` : ''}${message.trim() ? `\n\nShe also typed: ${message.trim()}` : ''}`;
           // In the conversation: her recording, with what he heard under it.
           message = `[Voice note](/api/voice/${voiceClipId})\n\n${heard}${message.trim() ? '\n\n' + message.trim() : ''}`;
         }

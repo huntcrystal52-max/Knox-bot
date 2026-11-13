@@ -39,12 +39,13 @@ async function ensureTables() {
     chosen BOOLEAN DEFAULT false,    -- he chose voice himself (not answering hers)
     created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
+  await pgPool.query(`ALTER TABLE voice_clips ADD COLUMN IF NOT EXISTS tone TEXT`);
 }
 
 // ── Hearing her ──────────────────────────────────────────────────────────────
 
 async function getClip(id) {
-  const r = await pgPool.query(`SELECT id, author, mime, data, transcript FROM voice_clips WHERE id = $1`, [id]);
+  const r = await pgPool.query(`SELECT id, author, mime, data, transcript, tone FROM voice_clips WHERE id = $1`, [id]);
   return r.rows[0] || null;
 }
 
@@ -72,6 +73,38 @@ async function transcribe(clip) {
     }
     return text || null;
   } catch (e) { console.log('[Knox][VOICE] Hearing error:', e.message); return null; }
+}
+
+// How she sounded — her tone, not her words. A model that can take sound
+// itself listens to the recording and describes it in a sentence or two.
+// Uses OpenRouter (the same key as his eyes). VOICE_TONE_MODEL changes the
+// model; VOICE_TONE_MODEL=off switches it off.
+const TONE_FORMATS = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/m4a': 'm4a', 'audio/x-m4a': 'm4a', 'audio/aac': 'aac', 'audio/ogg': 'ogg', 'audio/flac': 'flac' };
+async function hearTone(clip) {
+  const toneModel = (process.env.VOICE_TONE_MODEL || 'google/gemini-2.5-flash').trim();
+  if (!clip || toneModel === 'off' || !process.env.OPENROUTER_API_KEY) return null;
+  if (clip.tone) return clip.tone;
+  const format = TONE_FORMATS[String(clip.mime).split(';')[0].toLowerCase()];
+  if (!format) { console.log(`[Knox][VOICE] Can't listen for tone in a ${clip.mime} recording.`); return null; }
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.OPENROUTER_API_KEY },
+      body: JSON.stringify({
+        model: toneModel,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: 'This is a voice note from a woman to her partner. Listen to HOW she speaks, not what she says. In one to three short sentences, describe her voice: tone, energy, warmth, pace, pauses, laughter or smiling, whether she sounds tired, happy, upset, tearful, playful, quiet, excited. Do not repeat her words. If it is hard to tell, say so plainly rather than guessing.' },
+          { type: 'input_audio', input_audio: { data: Buffer.from(clip.data).toString('base64'), format } }
+        ] }]
+      })
+    });
+    const d = await res.json().catch(() => ({}));
+    const tone = d.choices && d.choices[0] && String(d.choices[0].message.content || '').trim();
+    if (!tone) { console.log('[Knox][VOICE] Tone listening failed:', res.status, JSON.stringify(d).slice(0, 200)); return null; }
+    await pgPool.query(`UPDATE voice_clips SET tone = $2 WHERE id = $1`, [clip.id, tone.slice(0, 800)]).catch(() => {});
+    console.log(`[Knox][VOICE] Heard how she sounded (via ${toneModel}).`);
+    return tone.slice(0, 800);
+  } catch (e) { console.log('[Knox][VOICE] Tone error:', e.message); return null; }
 }
 
 // ── Speaking ─────────────────────────────────────────────────────────────────
@@ -165,4 +198,4 @@ async function promptNote(mode) {
   return '';
 }
 
-module.exports = { ensureTables, enabled, getClip, transcribe, speak, forReading, promptNote, canChoose };
+module.exports = { ensureTables, enabled, getClip, transcribe, hearTone, speak, forReading, promptNote, canChoose };
