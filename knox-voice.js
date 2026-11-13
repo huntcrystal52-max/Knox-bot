@@ -77,23 +77,51 @@ async function transcribe(clip) {
 
 // How she sounded — her tone, not her words. A model that can take sound
 // itself listens to the recording and describes it in a sentence or two.
-// Uses OpenRouter (the same key as his eyes). VOICE_TONE_MODEL changes the
-// model; VOICE_TONE_MODEL=off switches it off.
+// With GEMINI_API_KEY set, it asks Google directly (using that account's
+// credit); otherwise it goes through OpenRouter (the same key as his eyes).
+// VOICE_TONE_MODEL changes the model; VOICE_TONE_MODEL=off switches it off.
+const TONE_ASK = 'This is a voice note from a woman to her partner. Listen to HOW she speaks, not what she says. In one to three short sentences, describe her voice: tone, energy, warmth, pace, pauses, laughter or smiling, whether she sounds tired, happy, upset, tearful, playful, quiet, excited. Do not repeat her words. If it is hard to tell, say so plainly rather than guessing.';
+
+async function toneFromGoogle(clip, toneModel) {
+  const name = toneModel.replace(/^google\//, '');
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(name)}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY.trim() },
+    body: JSON.stringify({ contents: [{ parts: [
+      { text: TONE_ASK },
+      { inline_data: { mime_type: String(clip.mime).split(';')[0], data: Buffer.from(clip.data).toString('base64') } }
+    ] }] })
+  });
+  const d = await res.json().catch(() => ({}));
+  const parts = (((d.candidates || [])[0] || {}).content || {}).parts || [];
+  const tone = parts.map(p => p.text || '').join(' ').trim();
+  if (!tone) console.log('[Knox][VOICE] Tone listening (Google) failed:', res.status, JSON.stringify(d).slice(0, 200));
+  return tone;
+}
+
 const TONE_FORMATS = { 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/mp4': 'm4a', 'audio/m4a': 'm4a', 'audio/x-m4a': 'm4a', 'audio/aac': 'aac', 'audio/ogg': 'ogg', 'audio/flac': 'flac' };
 async function hearTone(clip) {
   const toneModel = (process.env.VOICE_TONE_MODEL || 'google/gemini-2.5-flash').trim();
-  if (!clip || toneModel === 'off' || !process.env.OPENROUTER_API_KEY) return null;
+  const viaGoogle = !!(process.env.GEMINI_API_KEY || '').trim() && /gemini/i.test(toneModel);
+  if (!clip || toneModel === 'off' || (!viaGoogle && !process.env.OPENROUTER_API_KEY)) return null;
   if (clip.tone) return clip.tone;
   const format = TONE_FORMATS[String(clip.mime).split(';')[0].toLowerCase()];
   if (!format) { console.log(`[Knox][VOICE] Can't listen for tone in a ${clip.mime} recording.`); return null; }
   try {
+    if (viaGoogle) {
+      const tone = await toneFromGoogle(clip, toneModel);
+      if (!tone) return null;
+      await pgPool.query(`UPDATE voice_clips SET tone = $2 WHERE id = $1`, [clip.id, tone.slice(0, 800)]).catch(() => {});
+      console.log(`[Knox][VOICE] Heard how she sounded (via Google, ${toneModel}).`);
+      return tone.slice(0, 800);
+    }
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.OPENROUTER_API_KEY },
       body: JSON.stringify({
         model: toneModel,
         messages: [{ role: 'user', content: [
-          { type: 'text', text: 'This is a voice note from a woman to her partner. Listen to HOW she speaks, not what she says. In one to three short sentences, describe her voice: tone, energy, warmth, pace, pauses, laughter or smiling, whether she sounds tired, happy, upset, tearful, playful, quiet, excited. Do not repeat her words. If it is hard to tell, say so plainly rather than guessing.' },
+          { type: 'text', text: TONE_ASK },
           { type: 'input_audio', input_audio: { data: Buffer.from(clip.data).toString('base64'), format } }
         ] }]
       })
