@@ -26,7 +26,7 @@ const enabled = () => !!key();
 const model = () => (process.env.ELEVENLABS_MODEL || 'eleven_v3').trim();
 const voiceId = () => (process.env.ELEVENLABS_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb').trim();
 const choicesPerDay = () => Math.max(0, parseInt(process.env.VOICE_CHOICES_PER_DAY || '3', 10));
-const MAX_SPOKEN = 1500; // characters — longer replies stay as text
+const maxSpoken = () => Math.max(300, parseInt(process.env.VOICE_MAX_CHARS || '2200', 10)); // characters spoken at most (~2 minutes)
 
 async function ensureTables() {
   await pgPool.query(`CREATE TABLE IF NOT EXISTS voice_clips (
@@ -193,14 +193,22 @@ async function speak(text, { chosen } = {}) {
   if (!enabled()) return null;
   const v3 = /v3/.test(model());
   let spoken = forSpeech(text, v3);
-  if (!spoken || spoken.length > MAX_SPOKEN) { if (spoken) console.log(`[Knox][VOICE] Reply too long to speak (${spoken.length} chars) — sending text.`); return null; }
+  if (!spoken) return null;
+  // Too long: he says the first part (up to the end of a sentence); the whole
+  // reply is still written underneath.
+  if (spoken.length > maxSpoken()) {
+    const cut = spoken.slice(0, maxSpoken());
+    const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('.\n'));
+    spoken = (end > 200 ? cut.slice(0, end + 1) : cut).trim();
+    console.log(`[Knox][VOICE] Long reply — speaking the first ${spoken.length} chars; the rest stays written.`);
+  }
   const left = await charactersLeft();
   if (left !== null && left < spoken.length + 200) { console.log(`[Knox][VOICE] Not enough of this month's voice allowance left (${left}) — sending text.`); return null; }
   try {
     let res = await tts(spoken, model());
     if (!res.ok && v3) { // fall back to the steady model (without the voice directions)
       console.log('[Knox][VOICE] eleven_v3 said', res.status, (await res.text()).slice(0, 160), '— trying eleven_multilingual_v2.');
-      spoken = forSpeech(text, false);
+      spoken = spoken.replace(AUDIO_TAG, '').replace(/[ \t]{2,}/g, ' ').trim();
       res = await tts(spoken, 'eleven_multilingual_v2');
     }
     if (!res.ok) { console.log('[Knox][VOICE] Speaking failed:', res.status, (await res.text()).slice(0, 200)); return null; }
@@ -231,7 +239,7 @@ async function promptNote(mode) {
   if (!enabled() || !mode) return '';
   const v3 = /v3/.test(model());
   if (mode === 'in') {
-    return `\n\nVOICE NOTE: Elira spoke to you — this is what you heard. You're answering with your own voice, so say it the way you'd say it out loud: natural spoken sentences, no lists, no emoji, no GIFs, nothing to read. Usually a few sentences — more only if she wants more.${v3 ? DIRECTIONS : ''}`;
+    return `\n\nVOICE NOTE: Elira spoke to you — this is what you heard. You're answering with your own voice, so say it the way you'd say it out loud: natural spoken sentences, no lists, no emoji, no GIFs, nothing to read. Keep it like a real voice note: about 30 to 60 seconds out loud (roughly 3 to 6 sentences, under 700 characters). Only go longer if she asks for more.${v3 ? DIRECTIONS : ''}`;
   }
   if (await canChoose()) {
     return `\n\nYOUR VOICE: you can answer out loud — add [VOICE] anywhere in your reply and it's sent as a voice note in your own voice. Rarely: only when hearing you would mean more than reading you (a goodnight, something tender, a laugh you want her to hear). Keep spoken replies short and natural, with no emoji or GIFs.${v3 ? DIRECTIONS : ''}`;
