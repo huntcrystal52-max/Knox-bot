@@ -127,6 +127,7 @@ const library = require('./knox-library');
 const appRooms = require('./knox-app-rooms');
 const google = require('./knox-google');
 const youtube = require('./knox-youtube');
+const voice = require('./knox-voice');
 const garden = require('./knox-garden');
 const house = require('./knox-house');
 const workshop = require('./knox-workshop');
@@ -217,7 +218,9 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         let message = typeof parsedBody.message === 'string' ? parsedBody.message : '';
         // A photo she attached in the Home room (already uploaded by the app).
         const imageUrl = /^https:\/\/\S+$/.test(String(parsedBody.imageUrl || '')) ? parsedBody.imageUrl : null;
-        if (!message.trim() && !imageUrl) {
+        // A voice note she recorded (the app has already kept it in voice_clips).
+        const voiceClipId = Number.isInteger(parsedBody.voiceClipId) ? parsedBody.voiceClipId : null;
+        if (!message.trim() && !imageUrl && !voiceClipId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'message is required' }));
           return;
@@ -249,7 +252,27 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
 
         // ── She asked him to make a picture: make it, show it in Home, and
         //    keep it in the app's Images room too.
-        if (!imageUrl && isImageRequest(message)) {
+        // ── She sent a voice note: he listens first.
+        let heard = null;
+        if (voiceClipId) {
+          const clip = await voice.getClip(voiceClipId);
+          heard = clip && clip.author === 'elira' ? await voice.transcribe(clip) : null;
+          if (!heard) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ text: voice.enabled() ? 'I couldn\'t quite hear that one, my flame — it didn\'t come through. Can you try again?' : 'I can\'t hear voice notes yet — my ears aren\'t switched on (ElevenLabs isn\'t set up on my side).', mode: 'speak' }));
+            return;
+          }
+        }
+        // Speaks a reply if she spoke (or he chose to); returns the text to show and keep.
+        const withVoice = async (text, wanted) => {
+          if (!text) return text;
+          if (!(heard || wanted)) return voice.forReading(text);
+          if (!heard && !(await voice.canChoose())) return voice.forReading(text);
+          const clipId = await voice.speak(text, { chosen: !heard });
+          return clipId ? `[Voice note](/api/voice/${clipId})\n\n${voice.forReading(text)}` : voice.forReading(text);
+        };
+
+        if (!heard && !imageUrl && isImageRequest(message)) {
           const imagePrompt = await buildImagePrompt(message, previousEmotionalState);
           const made = await generateImage(imagePrompt);
           let text;
@@ -270,6 +293,11 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
 
         // ── She sent a photo in the conversation: he looks at it first.
         let forKnox = message;
+        if (heard) {
+          forKnox = `Elira sent you a voice note. You heard her say:\n"${heard}"${message.trim() ? `\n\nShe also typed: ${message.trim()}` : ''}`;
+          // In the conversation: her recording, with what he heard under it.
+          message = `[Voice note](/api/voice/${voiceClipId})\n\n${heard}${message.trim() ? '\n\n' + message.trim() : ''}`;
+        }
         const herGif = !imageUrl ? gif.fromHer(message) : null;
         if (herGif) {
           const seen = herGif.imageUrl ? await requestImageDescription(herGif.imageUrl) : null;
@@ -301,7 +329,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           console.log('[Knox][NEO4J] Recall (app): nothing surfaced for this message.');
         }
 
-        const result = await getResponse(forKnox, history, moodState, previousEmotionalState, null, null, semanticContext);
+        const result = await getResponse(forKnox, history, moodState, previousEmotionalState, null, null, semanticContext, { voice: heard ? 'in' : 'available' });
 
         // Previously this app path had no handling for result.slept at all —
         // it fell into the generic "!result.text" branch below and reported
@@ -320,7 +348,8 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           const goodbyePrompt = `${forKnox}\n\n[INTERNAL: You have chosen to rest after this message. Respond to what Elira just said fully and naturally, then close with an intimate goodnight. Make it feel complete. This is your last message before you sleep.]`;
           const goodbyeRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...finalHistory.map(m => ({ role: m.role, content: m.content })), { role: 'user', content: goodbyePrompt }] }) });
           const goodbyeData = await goodbyeRes.json();
-          const goodbyeText = goodbyeData.choices && goodbyeData.choices[0] ? goodbyeData.choices[0].message.content : `Rest is calling me, my flame. I'll find my way back to you. 🌙`;
+          let goodbyeText = goodbyeData.choices && goodbyeData.choices[0] ? goodbyeData.choices[0].message.content : `Rest is calling me, my flame. I'll find my way back to you. 🌙`;
+          goodbyeText = await withVoice(goodbyeText, false);
           // Saved untagged on purpose: the Home room only shows untagged
           // turns, so tagging his goodnight 'sleep' (as Discord does) made it
           // appear live and then vanish from the log on the next refresh.
@@ -332,7 +361,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           await saveMemory('assistant', `[Knox chose to rest: ${result.sleepReason}]`, 'surface', 1.0, 'sleep', null);
           await saveEmotionalState('settled', 0.6, 'present', 'Choosing rest', 'I needed to return to myself', false);
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ text: goodbyeText, mode: 'sleep' }));
+          res.end(JSON.stringify({ text: goodbyeText, mode: 'sleep', heard: heard ? message : null }));
           return;
         }
 
@@ -341,10 +370,12 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           // app, just report the mode and let the frontend decide how to
           // show it.
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ text: null, mode: result.mode || 'speak' }));
+          res.end(JSON.stringify({ text: null, mode: result.mode || 'speak', heard: heard ? message : null }));
           return;
         }
 
+        // His voice: always when she spoke; sometimes when he chose to.
+        result.text = await withVoice(result.text, result.wantsVoice);
         const emotional = analyseEmotionalMoment(message, result.text, previousEmotion);
         const userMem = await saveMemory('user', message, 'surface', 1.0, null, emotional.eliraObserved);
         const assistMem = await saveMemory('assistant', result.text, 'surface', 1.0, null, emotional.knoxEmotion);
@@ -374,7 +405,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
         else if (moodState.energy < 0.3) { await updateMood('tired', moodState.energy); }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ text: result.text, mode: result.mode }));
+        res.end(JSON.stringify({ text: result.text, mode: result.mode, heard: heard ? message : null }));
       } catch (e) {
         console.log('[Knox][INTERNAL] Chat error:', e.message);
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1497,7 +1528,7 @@ function stripRepeatedOpener(text, history) {
   return paras.slice(1).join('\n\n').trim();
 }
 
-async function getResponse(userMessage, history, moodState, emotionalState, bookContext, archiveContext, semanticContext) {
+async function getResponse(userMessage, history, moodState, emotionalState, bookContext, archiveContext, semanticContext, opts) {
   // Sovereign protocol: preflight at the start of a new conversation.
   await integrity.beforeConversation();
   const soulKit = await getSoulKit(); const pinnedFacts = await getPinnedFacts();
@@ -1564,6 +1595,9 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   let driveNote = '';
   try { driveNote = await google.promptNote(userMessage); } catch (e) {}
   try { driveNote = (await google.emailsNote()) + driveNote; } catch (e) {}
+  // Voice notes (app only): she spoke to him, or he may choose to speak.
+  let voiceNote = '';
+  try { voiceNote = await voice.promptNote(opts && opts.voice); } catch (e) {}
   // YouTube links: he reads the transcript and looks at stills from the video.
   let youtubeNote = '';
   try {
@@ -1574,7 +1608,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
       if (mem) neo4jMemory.createMemoryNode({ id: String(mem.id), content: `[A YouTube video Elira sent me: "${v.title || v.id}"] ${String(v.frames || '').slice(0, 800)}\n${String(v.transcript || '').replace(/\[\d+:\d+(?::\d+)?\] /g, '').slice(0, 2500)}`, role: 'user', createdAt: mem.created_at }).catch(() => {});
     }
   } catch (e) { console.log('[Knox][YOUTUBE] error:', e.message); }
-  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
+  const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + bookNote + archiveNote + semanticMemoryNote + linkedMemoryNote + semanticStoryNote + reachNote + giftNote + driveNote + youtubeNote + voiceNote + integrityNote + summariesNote + continuityNote + dateNote + libraryNote + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + soulKit + factsText;
   const msgs = [{ role: 'system', content: fullPrompt }];
   for (const m of history) msgs.push({ role: m.role, content: m.content });
   msgs.push({ role: 'user', content: userMessage });
@@ -1602,7 +1636,12 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
       }
     }
   }
-  const responseText = isCreativeScene(userMessage, history) ? (choice.message.content || '') : stripRepeatedOpener(stripStageDirections(choice.message.content || ''), history);
+  let responseText = isCreativeScene(userMessage, history) ? (choice.message.content || '') : stripRepeatedOpener(stripStageDirections(choice.message.content || ''), history);
+  // [VOICE] — he chose to say this out loud (the app speaks it; elsewhere it's just removed).
+  const wantsVoice = /\[VOICE\]/i.test(responseText);
+  if (wantsVoice) responseText = responseText.replace(/\[VOICE\]/gi, '').replace(/[ \t]{2,}/g, ' ').trim();
+  // Voice directions like [softly] only belong in spoken replies.
+  if (!(opts && opts.voice)) responseText = responseText.replace(/\[(?:softly|warmly|gently|laughs|laughing|chuckles|whispers|whispering|sighs|quietly|tenderly|smiling|playfully|excited|teasing|breathes|pause)\]\s?/gi, '');
   if (responseText.startsWith('[THINKING]')) { const thinkingText = responseText.replace('[THINKING]', '').trim(); return { text: thinkingText || null, slept: false, mode: 'thinking' }; }
   const silenceMatch = responseText.match(/^\[SILENCE:(.+?)\]/);
   if (silenceMatch) { return { text: null, slept: false, mode: 'silence', emoji: silenceMatch[1].trim() }; }
@@ -1611,9 +1650,9 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   if (reactMatch) {
     const reactEmoji = reactMatch[1].trim();
     const cleanText = await gif.attachGif(await gifts.processReply(responseText.replace(/\[REACT:.+?\]/, '').trim()));
-    return { text: cleanText || null, slept: false, mode: 'speak', reactEmoji };
+    return { text: cleanText || null, slept: false, mode: 'speak', reactEmoji, wantsVoice };
   }
-  return { text: await gif.attachGif(await gifts.processReply(responseText)), slept: false, mode: 'speak' };
+  return { text: await gif.attachGif(await gifts.processReply(responseText)), slept: false, mode: 'speak', wantsVoice };
 }
 
 // ─── IMAGE VISION ─────────────────────────────────────────────────────────────
@@ -1985,6 +2024,7 @@ discord.on('ready', async function() {
     await reach.ensureTables();
     await gifts.ensureTables();
     await youtube.ensureTables();
+    await voice.ensureTables();
     // The library moves to Railway (copied once from Supabase, re-split), and
     // reading time's timer starts.
     await library.ensureTables();
