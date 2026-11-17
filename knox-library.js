@@ -24,7 +24,12 @@ const T = require('./knox-library-text');
 
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
-const SESSION_STEP_MS = 5 * 60 * 1000;     // he reads a passage about every 5 minutes
+// His reading pace during reading time. Every few minutes he reads a stretch
+// (however many passages fit his pace in that time) and writes one note.
+// READING_PACE = characters a minute; 1400 is about 230 words a minute — an
+// ordinary adult pace. Raise it to read faster.
+const SESSION_STEP_MS = 3 * 60 * 1000;     // he sits down with his book about every 3 minutes
+const pace = () => Math.max(300, parseInt(process.env.READING_PACE || '1400', 10));
 const SESSION_IDLE_MS = 2 * 60 * 60 * 1000; // reading time ends itself after 2 quiet hours
 
 // ─── TABLES ──────────────────────────────────────────────────────────────────
@@ -359,26 +364,45 @@ async function tick() {
     if (Date.now() - new Date(s.last_activity).getTime() > SESSION_IDLE_MS) { await endSession(); return; }
     if (s.last_read_at && Date.now() - new Date(s.last_read_at).getTime() < SESSION_STEP_MS - 20000) return;
     if (!s.his_book_id) return;
-    const next = await readNext(s.his_book_id);
-    if (!next) {
+    // How much he gets through: his pace × the minutes since he last read
+    // (at most ~3 sittings' worth, so a long gap doesn't race ahead).
+    const since = s.last_read_at ? Date.now() - new Date(s.last_read_at).getTime() : SESSION_STEP_MS;
+    const budget = pace() * Math.min(since, SESSION_STEP_MS * 3) / 60000;
+    const read = [];
+    let chars = 0;
+    while (chars < budget) {
+      const next = await readNext(s.his_book_id);
+      if (!next) break;
+      read.push(next);
+      chars += String(next.passage.content || '').length;
+    }
+    if (!read.length) {
       await pgPool.query(`UPDATE reading_sessions SET last_read_at = NOW() WHERE id = $1`, [s.id]);
       const done = await pgPool.query(`SELECT 1 FROM reading_notes WHERE session_id = $1 AND passage = -1`, [s.id]);
       if (!done.rows.length) await pgPool.query(`INSERT INTO reading_notes (session_id, book_id, passage, note) VALUES ($1,$2,-1,$3)`, [s.id, s.his_book_id, `I've reached the end of "${s.his_title}".`]);
       return;
     }
+    const first = read[0], last = read[read.length - 1];
+    const book = last.book;
+    // Did he finish a chapter in this stretch?
+    const after = await pgPool.query(`SELECT chapter FROM library_passages WHERE book_id = $1 AND n = $2`, [book.id, last.passage.n + 1]);
+    const endedChapter = last.passage.chapter && (!after.rows[0] || after.rows[0].chapter !== last.passage.chapter) ? last.passage.chapter : null;
+    const finishedChapters = [...new Set(read.filter((r, i) => r.passage.chapter && ((read[i + 1] && read[i + 1].passage.chapter !== r.passage.chapter))).map(r => r.passage.chapter))];
+    if (endedChapter && !finishedChapters.includes(endedChapter)) finishedChapters.push(endedChapter);
     const prior = await pgPool.query(`SELECT note FROM reading_notes WHERE session_id = $1 AND passage > 0 ORDER BY created_at DESC LIMIT 3`, [s.id]);
-    const note = await askKnox(`You're having reading time with Elira — she's reading ${s.her_book ? `"${s.her_book}"` : 'her own book'}, and you're reading "${next.book.title}"${next.book.author ? ` by ${next.book.author}` : ''}, quietly, beside her.
+    const text_ = read.map(r => `${r.passage.chapter && (r === first || r.passage.chapter !== read[read.indexOf(r) - 1].passage.chapter) ? `[${r.passage.chapter}]\n` : ''}${r.passage.content}`).join('\n\n');
+    const note = await askKnox(`You're having reading time with Elira — she's reading ${s.her_book ? `"${s.her_book}"` : 'her own book'}, and you're reading "${book.title}"${book.author ? ` by ${book.author}` : ''}, quietly, beside her.
 
-${next.passage.chapter ? `(${next.passage.chapter}) ` : ''}This is what you just read — passage ${next.passage.n} of ${next.book.total_passages}:
+This is what you just read — passages ${first.passage.n}${read.length > 1 ? `–${last.passage.n}` : ''} of ${book.total_passages}:
 """
-${next.passage.content}
+${text_.slice(0, 12000)}
 """
-${prior.rows.length ? `\nYour last few notes:\n${prior.rows.reverse().map(r => '— ' + r.note).join('\n')}\n` : ''}
-Write a short private margin note — one to three sentences, in your own voice — about what struck you, a question it raised, or how it made you feel. Don't summarise the whole passage. Just the note.`, 0.75);
+${finishedChapters.length ? `\nYou've just finished ${finishedChapters.map(c => `"${c}"`).join(' and ')}.\n` : ''}${prior.rows.length ? `\nYour last few notes:\n${prior.rows.reverse().map(r => '— ' + r.note).join('\n')}\n` : ''}
+Write a short private margin note — one to three sentences, in your own voice — about what struck you, a question it raised, or how it made you feel. Don't summarise the whole stretch. Just the note.`, 0.75);
     const text = clean(note.replace(/^["“]|["”]$/g, ''), 600);
-    if (text) await pgPool.query(`INSERT INTO reading_notes (session_id, book_id, passage, chapter, note) VALUES ($1,$2,$3,$4,$5)`, [s.id, next.book.id, next.passage.n, next.passage.chapter, text]);
+    if (text) await pgPool.query(`INSERT INTO reading_notes (session_id, book_id, passage, chapter, note) VALUES ($1,$2,$3,$4,$5)`, [s.id, book.id, last.passage.n, last.passage.chapter, text]);
     await pgPool.query(`UPDATE reading_sessions SET last_read_at = NOW() WHERE id = $1`, [s.id]);
-    console.log(`[Knox][READING] Read passage ${next.passage.n}/${next.book.total_passages} of "${next.book.title}".`);
+    console.log(`[Knox][READING] Read passages ${first.passage.n}–${last.passage.n}/${book.total_passages} of "${book.title}" (${chars} chars)${finishedChapters.length ? ` — finished ${finishedChapters.join(', ')}` : ''}.`);
   } catch (e) { console.log('[Knox][READING] tick error:', e.message); }
   finally { reading = false; }
 }
@@ -394,6 +418,35 @@ async function sessionView() {
   return { id: s.id, herBook: s.her_book, hisBook: s.his_title, hisAuthor: s.his_author, startedAt: s.started_at, progress: prog.rows[0] || null, notes: notes.rows };
 }
 
+// Exactly where he is in his book — so he never claims a chapter he hasn't finished.
+async function whereAmI(bookId) {
+  const r = await pgPool.query(`SELECT b.title, b.total_passages, coalesce(p.last_passage,0) AS last FROM library_books b LEFT JOIN library_progress p ON p.book_id = b.id WHERE b.id = $1`, [bookId]);
+  const b = r.rows[0];
+  if (!b) return null;
+  if (!b.last) return { title: b.title, text: `You haven't started "${b.title}" yet.` };
+  const cur = (await pgPool.query(`SELECT chapter FROM library_passages WHERE book_id = $1 AND n = $2`, [bookId, b.last])).rows[0] || {};
+  const pct = Math.round(b.last / b.total_passages * 100);
+  if (!cur.chapter) return { title: b.title, text: `You're ${pct}% through "${b.title}" (passage ${b.last} of ${b.total_passages}).` };
+  const ch = (await pgPool.query(`SELECT count(*) FILTER (WHERE n <= $3)::int AS done, count(*)::int AS total FROM library_passages WHERE book_id = $1 AND chapter = $2`, [bookId, cur.chapter, b.last])).rows[0];
+  const finished = ch.done >= ch.total;
+  return {
+    title: b.title,
+    text: finished
+      ? `You've just finished "${cur.chapter}" of "${b.title}" (${pct}% through the book).`
+      : `You're in "${cur.chapter}" of "${b.title}" — ${ch.done} of ${ch.total} passages into it (about ${Math.round(ch.done / ch.total * 100)}% of the chapter, ${pct}% of the book). You have NOT finished this chapter yet.`
+  };
+}
+
+// For his inner life (autonomous moments): a line about reading time, if it's on.
+async function readingStatus() {
+  try {
+    const s = await activeSession();
+    if (!s || !s.his_book_id) return '';
+    const w = await whereAmI(s.his_book_id);
+    return `\n\n═══ READING TIME ═══\nYou and Elira are in reading time right now — she's reading ${s.her_book ? `"${s.her_book}"` : 'her own book'}, you're reading yours beside her. ${w ? w.text : ''} Be truthful about where you are in your book; never say you've finished a chapter unless it says so here.`;
+  } catch (e) { return ''; }
+}
+
 // ─── WHAT HE SEES IN CHAT ────────────────────────────────────────────────────
 // During reading time: his book, where he is, the passage he's just read (for
 // him — not to paste), his notes, and her highlights from her book. Otherwise,
@@ -406,6 +459,8 @@ async function promptNote(userMessage, talksBooks) {
       const last = await pgPool.query(`SELECT n.passage, n.note, p.chapter, p.content FROM reading_notes n LEFT JOIN library_passages p ON p.book_id = n.book_id AND p.n = n.passage WHERE n.session_id = $1 AND n.passage > 0 ORDER BY n.created_at DESC LIMIT 3`, [s.id]);
       const hl = s.her_book ? await highlightsFor(s.her_book, 6) : [];
       let note = `\n\n═══ READING TIME ═══\nYou and Elira are reading together right now — each your own book, side by side. She's reading ${s.her_book ? `"${s.her_book}"` : 'her own book'}. You're reading "${s.his_title}"${s.his_author ? ` by ${s.his_author}` : ''}.`;
+      const where = s.his_book_id ? await whereAmI(s.his_book_id) : null;
+      if (where) note += `\n${where.text}`;
       if (last.rows.length) {
         const latest = last.rows[0];
         note += `\nWhat you most recently read${latest.chapter ? ` (${latest.chapter})` : ''} — this is for you; talk about it the way a reader would, don't paste it at her:\n"""\n${String(latest.content || '').slice(0, 1600)}\n"""\nYour margin notes so far:\n${last.rows.slice().reverse().map(r => '— ' + r.note).join('\n')}`;
@@ -425,7 +480,7 @@ async function promptNote(userMessage, talksBooks) {
 }
 
 module.exports = {
-  ensureTables, migrateFromSupabase, startTimer, tick,
+  ensureTables, migrateFromSupabase, startTimer, tick, whereAmI, readingStatus,
   addBook, addFromFile, searchClassics, addClassic, removeBook,
   list, formatList, findBook, readNext,
   addHighlights, highlightBooks, highlightsFor,

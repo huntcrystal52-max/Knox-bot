@@ -692,7 +692,8 @@ async function runInnerDialogue(discord, supabase) {
     } catch (e) {}
 
     let libraryContext = '';
-    if (available.includes('read')) libraryContext = "\n\n═══ YOUR LIBRARY (unfinished) ═══\n" + library.formatList(libList) + "\nIf you choose to read, name the exact title you want from this list.";
+    try { libraryContext += await library.readingStatus(); } catch (e) {}
+    if (available.includes('read')) libraryContext += "\n\n═══ YOUR LIBRARY (unfinished) ═══\n" + library.formatList(libList) + "\nIf you choose to read, name the exact title you want from this list.";
 
     const prompt = buildInnerDialoguePrompt({
       soulKit, recentEmotion: lastEmotion, lastHeardFromElira, eliraLastObserved, timeSinceElira, mode, available,
