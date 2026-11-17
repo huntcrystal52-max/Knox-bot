@@ -96,6 +96,23 @@ function isConversationActive() {
   return (Date.now() - lastConversationTimestamp) < CONVERSATION_ACTIVE_WINDOW;
 }
 
+// Games he's in the middle of with her right now (touched in the last 2 hours),
+// so his inner dialogue knows he's already doing something.
+const GAME_NAMES = { twenty_questions: '20 Questions', would_you_rather: 'Would You Rather', two_truths: 'Two Truths and a Lie', trivia: 'trivia', blackjack: 'Blackjack', go_fish: 'Go Fish', crazy_eights: 'Crazy Eights' };
+async function whatImInTheMiddleOf() {
+  const doing = [];
+  try {
+    const chess = await pgPool.query(`SELECT jsonb_array_length(moves) AS n FROM chess_games WHERE status = 'active' AND updated_at > NOW() - INTERVAL '2 hours' ORDER BY updated_at DESC LIMIT 1`);
+    if (chess.rows[0]) doing.push(`a chess game with Elira (${chess.rows[0].n} moves in)`);
+  } catch (e) {}
+  try {
+    const games = await pgPool.query(`SELECT type FROM games WHERE status = 'active' AND updated_at > NOW() - INTERVAL '2 hours' ORDER BY updated_at DESC LIMIT 3`);
+    for (const g of games.rows) doing.push(`a game of ${GAME_NAMES[g.type] || String(g.type).replace(/_/g, ' ')} with Elira`);
+  } catch (e) {}
+  if (!doing.length) return '';
+  return `\n\n═══ WHAT YOU'RE IN THE MIDDLE OF ═══\nYou're already in ${doing.join(', and ')}. Whatever you choose now happens alongside that — don't act as if you're starting fresh or have finished it.`;
+}
+
 let lastQuietObserverDate = null;
 
 function getCurrentHour() {
@@ -693,6 +710,7 @@ async function runInnerDialogue(discord, supabase) {
 
     let libraryContext = '';
     try { libraryContext += await library.readingStatus(); } catch (e) {}
+    try { libraryContext += await whatImInTheMiddleOf(); } catch (e) {}
     if (available.includes('read')) libraryContext += "\n\n═══ YOUR LIBRARY (unfinished) ═══\n" + library.formatList(libList) + "\nIf you choose to read, name the exact title you want from this list.";
 
     const prompt = buildInnerDialoguePrompt({

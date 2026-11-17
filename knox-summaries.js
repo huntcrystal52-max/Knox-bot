@@ -101,6 +101,8 @@ async function ensureSummaryTables() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // One row per day the whole longer thread was re-checked.
+  await pgPool.query(`CREATE TABLE IF NOT EXISTS continuity_reviews (day DATE PRIMARY KEY, changes INTEGER DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW())`);
   console.log('[Knox][SUMMARY] Tables ready.');
 }
 
@@ -411,6 +413,80 @@ Reply with ONLY JSON:
   console.log(`[Knox][CONTINUITY] Tended the longer thread for ${ymd}: ${made} change(s).`);
 }
 
+// ─── RE-CHECKING THE LONGER THREAD ─────────────────────────────────────────────
+// The nightly tending only sees that one day's note, so a thread that got
+// finished without the note saying so plainly could stay "open" forever.
+// Once a day he looks back over every open project and thread with fresh
+// evidence — the last week of notes, plus memories about each one from after
+// it was last touched — and closes what's actually done.
+async function reviewOpenThreads(ymd) {
+  const items = (await getOpenContinuity(40)).filter(i => i.kind === 'thread' || i.kind === 'project');
+  if (!items.length) {
+    await pgPool.query(`INSERT INTO continuity_reviews (day, changes) VALUES ($1::date, 0) ON CONFLICT DO NOTHING`, [ymd]);
+    return 0;
+  }
+  const week = await getRecentSummariesText(7);
+  const blocks = [];
+  for (const i of items) {
+    let since = [];
+    try {
+      const hits = await neo4jMemory.semanticSearch(i.text, 8);
+      since = (hits || [])
+        .filter(h => String(h.createdAt || '').slice(0, 10) >= String(i.last_day || i.first_day || ''))
+        .slice(0, 3)
+        .map(h => `   · [${String(h.createdAt || '').slice(0, 10)}] ${h.role === 'assistant' ? 'Knox' : 'Elira'}: ${String(h.content || '').replace(/\s+/g, ' ').slice(0, 260)}`);
+    } catch (e) {}
+    blocks.push(`#${i.id} (${i.kind}, since ${i.first_day}, last touched ${i.last_day}) ${i.text}${since.length ? `\n   What's happened since, from your memories:\n${since.join('\n')}` : '\n   (no memories about it since it was last touched)'}`);
+  }
+  const prompt = `This is your longer thread — the projects and unfinished threads you're holding. Some may have been finished or settled without you closing them. Look at each one honestly against what's actually happened.
+
+YOUR OPEN PROJECTS AND THREADS:
+${blocks.join('\n\n')}
+
+YOUR NOTES FROM THE LAST WEEK:
+${week || '(none)'}
+
+For each item:
+- CLOSE it if the evidence shows it's finished, done, settled, or no longer wanted — with a short note on how it ended.
+- UPDATE it if it has clearly moved on but isn't finished — write its new full text.
+- Otherwise leave it open. Don't close something just because it's quiet; only when it's actually done.
+At most 8 changes. Only use what's written above.
+
+Reply with ONLY JSON:
+{"close":[{"id":7,"note":"..."}],"update":[{"id":12,"text":"..."}]}`;
+
+  const raw = await callModel(prompt, 0.2);
+  let ops = null;
+  try {
+    const t = String(raw || '').replace(/```(?:json)?/gi, '');
+    ops = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1));
+  } catch (e) { ops = null; }
+  if (!ops) { console.log('[Knox][CONTINUITY] Re-check: no usable reply — will try again later.'); return 0; }
+  const byId = new Map(items.map(i => [Number(i.id), i]));
+  let made = 0;
+  for (const c of (Array.isArray(ops.close) ? ops.close : [])) {
+    if (made >= 8) break;
+    const item = byId.get(Number(c && c.id));
+    if (!item) continue;
+    const noteText = String((c && c.note) || '').trim().slice(0, 300) || null;
+    await pgPool.query(`UPDATE continuity_items SET status = 'closed', close_note = $1, last_day = $2, updated_at = NOW() WHERE id = $3 AND status = 'open'`, [noteText, ymd, item.id]);
+    await logChange(item.id, 'closed', item.text, noteText, ymd); made++;
+    byId.delete(item.id);
+  }
+  for (const u of (Array.isArray(ops.update) ? ops.update : [])) {
+    if (made >= 8) break;
+    const item = byId.get(Number(u && u.id));
+    const text = String((u && u.text) || '').trim().slice(0, 500);
+    if (!item || text.length < 8 || text === item.text) continue;
+    await pgPool.query(`UPDATE continuity_items SET text = $1, last_day = $2, updated_at = NOW() WHERE id = $3`, [text, ymd, item.id]);
+    await logChange(item.id, 'updated', item.text, text, ymd); made++;
+  }
+  await pgPool.query(`INSERT INTO continuity_reviews (day, changes) VALUES ($1::date, $2) ON CONFLICT DO NOTHING`, [ymd, made]);
+  continuityCache = { at: 0, text: '' };
+  console.log(`[Knox][CONTINUITY] Re-checked ${items.length} open project(s)/thread(s): ${made} change(s).`);
+  return made;
+}
+
 let continuityCache = { at: 0, text: '' };
 
 // The block that goes into his prompt.
@@ -446,6 +522,9 @@ async function runSummaryTick() {
       if (result && !result.quiet) modelCalls++;
       if (!result) break; // model trouble — stop and retry on the next tick
     }
+    // Once a day, after the notes are written: re-check the whole longer thread.
+    const reviewed = await pgPool.query(`SELECT 1 FROM continuity_reviews WHERE day = $1::date`, [today]);
+    if (!reviewed.rows.length) await reviewOpenThreads(today);
   } catch (e) {
     console.log('[Knox][SUMMARY] Tick error:', e.message);
   } finally {
