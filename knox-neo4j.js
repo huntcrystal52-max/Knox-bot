@@ -134,8 +134,43 @@ const httpDriver = {
   close: async () => {}
 };
 
+// Errors that mean "couldn't reach the database" (not a mistake in a query).
+const UNREACHABLE = /ServiceUnavailable|SessionExpired|Failed to connect|routing servers|discovery|socket|ECONNRESET|ETIMEDOUT|ENOTFOUND|timed out|Connection (?:was )?(?:closed|acquisition)/i;
+let boltRetryAt = 0;
+
+// A Bolt session that, if a request can't reach the database, quietly redoes
+// that request over HTTPS and stays on HTTPS for a while (30 minutes).
+function safeSession() {
+  let bolt = null;
+  return {
+    run: async (cypher, params) => {
+      if (viaHttp) return httpRun(cypher, params);
+      try {
+        bolt = bolt || boltDriver().session();
+        return await bolt.run(cypher, params);
+      } catch (e) {
+        if (transport() !== 'auto' || !UNREACHABLE.test(`${e.code || ''} ${e.message || ''}`)) throw e;
+        const result = await httpRun(cypher, params); // throws if HTTPS fails too
+        if (!viaHttp) console.log(`[Knox][NEO4J] Bolt dropped (${String(e.message).slice(0, 80)}…) — switched to the HTTPS Query API for 30 minutes.`);
+        viaHttp = true;
+        boltRetryAt = Date.now() + 30 * 60 * 1000;
+        return result;
+      }
+    },
+    close: async () => { if (bolt) { try { await bolt.close(); } catch (e) {} } }
+  };
+}
+
+const safeDriver = {
+  session: () => safeSession(),
+  verifyConnectivity: () => (viaHttp ? httpRun('RETURN 1 AS ok') : boltDriver().verifyConnectivity()),
+  close: async () => { if (driver) await driver.close(); }
+};
+
 function getDriver() {
-  return viaHttp ? httpDriver : boltDriver();
+  if (transport() === 'http') return httpDriver;
+  if (transport() === 'bolt') return boltDriver();
+  return safeDriver;
 }
 
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), ms))]);
@@ -169,7 +204,7 @@ async function testConnection() {
   const ok = await connect();
   if (ok) console.log(`[Knox][NEO4J] Connected successfully${viaHttp ? ' (over HTTPS)' : ''}.`);
   // Keep checking: switch to HTTPS if Bolt breaks later, and back when it's fixed.
-  if (!healthTimer && transport() === 'auto') healthTimer = setInterval(() => { connect().catch(() => {}); }, 10 * 60 * 1000);
+  if (!healthTimer && transport() === 'auto') healthTimer = setInterval(() => { if (!viaHttp || Date.now() >= boltRetryAt) connect().catch(() => {}); }, 10 * 60 * 1000);
   return ok;
 }
 
