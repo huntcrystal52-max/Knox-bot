@@ -48,25 +48,129 @@ async function getRelevantContext(queryText, options) {
   }
 }
 
-function getDriver() {
+// ─── TWO WAYS IN ──────────────────────────────────────────────────────────────
+// Normally Knox talks to Neo4j over "Bolt" (port 7687). If that door won't
+// open from Railway, he uses Neo4j's HTTPS Query API instead (the ordinary
+// web port, 443) — same database, same queries, same results. It switches on
+// its own when Bolt fails and HTTPS works, and checks again every 10 minutes.
+// NEO4J_TRANSPORT = auto (default) | bolt | http to force one.
+const transport = () => String(process.env.NEO4J_TRANSPORT || 'auto').toLowerCase();
+let viaHttp = transport() === 'http';
+
+function boltDriver() {
   if (driver) return driver;
   driver = neo4j.driver(
     process.env.NEO4J_URI,
-    neo4j.auth.basic(process.env.NEO4J_USERNAME, process.env.NEO4J_PASSWORD)
+    neo4j.auth.basic(process.env.NEO4J_USERNAME, process.env.NEO4J_PASSWORD),
+    { connectionTimeout: 20000 }
   );
   return driver;
 }
 
-async function testConnection() {
+function queryApiUrl() {
+  const host = String(process.env.NEO4J_URI || '').replace(/^[a-z0-9+.-]+:\/\//i, '').replace(/[:/].*$/, '');
+  return `https://${host}/db/${process.env.NEO4J_DATABASE || 'neo4j'}/query/v2`;
+}
+
+// Our values → Neo4j's typed JSON (matching what the Bolt driver would send:
+// neo4j.int(...) is an Integer, every other JS number is a Float).
+function toTyped(v) {
+  if (v === null || v === undefined) return { $type: 'Null', _value: null };
+  if (neo4j.isInt(v)) return { $type: 'Integer', _value: v.toString() };
+  if (typeof v === 'number') return { $type: 'Float', _value: String(v) };
+  if (typeof v === 'bigint') return { $type: 'Integer', _value: v.toString() };
+  if (typeof v === 'boolean') return { $type: 'Boolean', _value: v };
+  if (typeof v === 'string') return { $type: 'String', _value: v };
+  if (Array.isArray(v)) return { $type: 'List', _value: v.map(toTyped) };
+  if (v instanceof Date) return { $type: 'OffsetDateTime', _value: v.toISOString() };
+  if (v && /Date|Time/.test((v.constructor && v.constructor.name) || '') && typeof v.toString === 'function') return { $type: 'OffsetDateTime', _value: v.toString() };
+  const out = {};
+  for (const [k, x] of Object.entries(v)) out[k] = toTyped(x);
+  return { $type: 'Map', _value: out };
+}
+
+// Neo4j's typed JSON → the same kinds of values the Bolt driver gives back
+// (Integers come back as neo4j Integers, so .toNumber() keeps working).
+function fromTyped(t) {
+  if (!t || typeof t !== 'object' || !('$type' in t)) return t;
+  const v = t._value;
+  switch (t.$type) {
+    case 'Null': return null;
+    case 'Integer': return neo4j.int(v);
+    case 'Float': return parseFloat(v);
+    case 'List': return (v || []).map(fromTyped);
+    case 'Map': { const o = {}; for (const [k, x] of Object.entries(v || {})) o[k] = fromTyped(x); return o; }
+    case 'Node': { const props = {}; for (const [k, x] of Object.entries((v && v._properties) || {})) props[k] = fromTyped(x); return { elementId: v._element_id, labels: v._labels || [], properties: props }; }
+    case 'Relationship': { const props = {}; for (const [k, x] of Object.entries((v && v._properties) || {})) props[k] = fromTyped(x); return { elementId: v._element_id, type: v._type, startNodeElementId: v._start_node_element_id, endNodeElementId: v._end_node_element_id, properties: props }; }
+    case 'Path': return (v || []).map(fromTyped);
+    default: return v; // strings, booleans, dates/times as ISO text
+  }
+}
+
+async function httpRun(cypher, params) {
+  const auth = Buffer.from(`${process.env.NEO4J_USERNAME}:${process.env.NEO4J_PASSWORD}`).toString('base64');
+  const parameters = {};
+  for (const [k, x] of Object.entries(params || {})) parameters[k] = toTyped(x);
+  const res = await fetch(queryApiUrl(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/vnd.neo4j.query', Accept: 'application/vnd.neo4j.query', Authorization: `Basic ${auth}` },
+    body: JSON.stringify({ statement: String(cypher), parameters })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (d.errors && d.errors.length) throw new Error(`${d.errors[0].code || 'Neo4j'}: ${d.errors[0].message}`);
+  if (!res.ok && !d.data) throw new Error(`Query API said ${res.status}`);
+  const fields = (d.data && d.data.fields) || [];
+  const records = ((d.data && d.data.values) || []).map(row => {
+    const obj = {};
+    fields.forEach((f, i) => { obj[f] = fromTyped(row[i]); });
+    return { keys: fields, get: (k) => (typeof k === 'number' ? obj[fields[k]] : obj[k]), has: (k) => k in obj, toObject: () => obj };
+  });
+  return { records, summary: {} };
+}
+
+const httpDriver = {
+  session: () => ({ run: httpRun, close: async () => {} }),
+  verifyConnectivity: () => httpRun('RETURN 1 AS ok'),
+  close: async () => {}
+};
+
+function getDriver() {
+  return viaHttp ? httpDriver : boltDriver();
+}
+
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), ms))]);
+
+// Finds a way in: Bolt first; if it fails, HTTPS. Returns true if either works.
+async function connect() {
+  if (transport() !== 'http') {
+    try {
+      await withTimeout(boltDriver().verifyConnectivity(), 25000);
+      if (viaHttp) console.log('[Knox][NEO4J] Bolt works again — switching back from HTTPS.');
+      viaHttp = false;
+      return true;
+    } catch (e) {
+      console.log('[Knox][NEO4J] Bolt connection failed:', e.message.slice(0, 160));
+      if (transport() === 'bolt') return false;
+    }
+  }
   try {
-    const d = getDriver();
-    await d.verifyConnectivity();
-    console.log('[Knox][NEO4J] Connected successfully.');
+    await httpRun('RETURN 1 AS ok');
+    if (!viaHttp) console.log('[Knox][NEO4J] Using the HTTPS Query API instead (same database).');
+    viaHttp = true;
     return true;
   } catch (e) {
-    console.log('[Knox][NEO4J] Connection failed:', e.message);
+    console.log('[Knox][NEO4J] HTTPS Query API failed too:', e.message.slice(0, 200));
     return false;
   }
+}
+
+let healthTimer = null;
+async function testConnection() {
+  const ok = await connect();
+  if (ok) console.log(`[Knox][NEO4J] Connected successfully${viaHttp ? ' (over HTTPS)' : ''}.`);
+  // Keep checking: switch to HTTPS if Bolt breaks later, and back when it's fixed.
+  if (!healthTimer && transport() === 'auto') healthTimer = setInterval(() => { connect().catch(() => {}); }, 10 * 60 * 1000);
+  return ok;
 }
 
 // ─── SCHEMA SETUP ─────────────────────────────────────────────────────────────
