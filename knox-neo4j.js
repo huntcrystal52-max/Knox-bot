@@ -67,9 +67,18 @@ function boltDriver() {
   return driver;
 }
 
-function queryApiUrl() {
-  const host = String(process.env.NEO4J_URI || '').replace(/^[a-z0-9+.-]+:\/\//i, '').replace(/[:/].*$/, '');
-  return `https://${host}/db/${process.env.NEO4J_DATABASE || 'neo4j'}/query/v2`;
+// Which database to ask for. Newer Aura databases are named after their ID
+// (the part before .databases.neo4j.io), older ones are called "neo4j".
+// NEO4J_DATABASE sets it outright; otherwise he tries both and remembers.
+const hostOf = () => String(process.env.NEO4J_URI || '').replace(/^[a-z0-9+.-]+:\/\//i, '').replace(/[:/].*$/, '');
+let dbName = (process.env.NEO4J_DATABASE || '').trim() || null;
+function dbCandidates() {
+  if (process.env.NEO4J_DATABASE) return [process.env.NEO4J_DATABASE.trim()];
+  const id = hostOf().split('.')[0];
+  return [...new Set([dbName, id, 'neo4j'].filter(Boolean))];
+}
+function queryApiUrl(name) {
+  return `https://${hostOf()}/db/${encodeURIComponent(name)}/query/v2`;
 }
 
 // Our values → Neo4j's typed JSON (matching what the Bolt driver would send:
@@ -108,10 +117,25 @@ function fromTyped(t) {
 }
 
 async function httpRun(cypher, params) {
+  let lastErr = null;
+  for (const name of dbCandidates()) {
+    try {
+      const out = await httpRunOn(name, cypher, params);
+      if (dbName !== name) { dbName = name; console.log(`[Knox][NEO4J] HTTPS: the database is called "${name}".`); }
+      return out;
+    } catch (e) {
+      lastErr = e;
+      if (!/DatabaseNotFound/i.test(e.message)) throw e; // a real error — don't try other names
+    }
+  }
+  throw lastErr;
+}
+
+async function httpRunOn(name, cypher, params) {
   const auth = Buffer.from(`${process.env.NEO4J_USERNAME}:${process.env.NEO4J_PASSWORD}`).toString('base64');
   const parameters = {};
   for (const [k, x] of Object.entries(params || {})) parameters[k] = toTyped(x);
-  const res = await fetch(queryApiUrl(), {
+  const res = await fetch(queryApiUrl(name), {
     method: 'POST',
     headers: { 'Content-Type': 'application/vnd.neo4j.query', Accept: 'application/vnd.neo4j.query', Authorization: `Basic ${auth}` },
     body: JSON.stringify({ statement: String(cypher), parameters })
