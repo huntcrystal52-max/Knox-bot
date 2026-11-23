@@ -1590,6 +1590,9 @@ function stripRepeatedOpener(text, history) {
 // whole books' worth of writing).
 const clip = (t, n) => { const x = String(t || ''); return x.length > n ? x.slice(0, n) + ' (…)' : x; };
 
+// His own activity notes (saved as memories) — never part of a reply to her.
+const PRIVATE_NOTE = /\n*\[(?:Continued unfinished|Began unfinished|Completed and posted|Wrote autonomously|Created image autonomously|Created image|Composed music autonomously|Researched|Searched archive|Dream loom|Scheduled [a-z]+ (?:reflection|research)|Left a love note|Tended the garden|Planted in the garden|Worked on the house|Built onto the house|Chose to listen to|Built playlist autonomously|Sent voice note autonomously|Noticed she was listening|Built something for the app|Wrote a proposal in the Workshop|Knox chose to rest|My reply in the [a-z ]+ room|I made door|Door \d+ of the advent)[^\]]*\][^\n]*/gi;
+
 // Most each part of his prompt may be (characters). Anything bigger is trimmed
 // and logged. The soul-kit and facts get more room; everything else 16,000.
 const PROMPT_PART_MAX = { soulKit: 60000, factsText: 30000, youtubeNote: 20000, videoNote: 16000, bookNote: 20000, archiveNote: 20000 };
@@ -1725,6 +1728,14 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   }
   let responseText = isCreativeScene(userMessage, history) ? (choice.message.content || '') : stripRepeatedOpener(stripStageDirections(choice.message.content || ''), history);
   // [VOICE] — he chose to say this out loud (the app speaks it; elsewhere it's just removed).
+  // His history includes his own private notes about things he did, like
+  // "[Continued unfinished poem: …]" or "[Wrote autonomously: …]". Sometimes the
+  // model copies that pattern onto the end of a reply. Those notes are his,
+  // not words to her, so they're taken back out (and logged).
+  const before = responseText;
+  responseText = responseText.replace(PRIVATE_NOTE, '').replace(/\n{3,}/g, '\n\n').trim();
+  if (responseText !== before) console.log(`[Knox][REPLY] Removed a private activity note he'd copied into his reply (${before.length - responseText.length} chars).`);
+  if (!responseText && before) responseText = before; // never send nothing because of this
   const wantsVoice = /\[VOICE\]/i.test(responseText);
   if (wantsVoice) responseText = responseText.replace(/\[VOICE\]/gi, '').replace(/[ \t]{2,}/g, ' ').trim();
   // Voice directions like [softly] only belong in spoken replies.
