@@ -1172,7 +1172,19 @@ async function getMemories() {
   } catch (e) { console.log('[Knox][MEMORY] getMemories error:', e.message); return []; }
 }
 
+// No single memory may be enormous. Anything bigger is cut, and the log says
+// where it came from (so a runaway can be found and fixed at its source).
+const MEMORY_MAX_CHARS = 30000;
+function capMemory(content, from) {
+  const c = String(content == null ? '' : content);
+  if (c.length <= MEMORY_MAX_CHARS) return content;
+  const caller = (new Error().stack || '').split('\n').slice(3, 4).join('').trim();
+  console.log(`[Knox][MEMORY] A ${c.length.toLocaleString('en-GB')}-char memory was cut to ${MEMORY_MAX_CHARS.toLocaleString('en-GB')} (${from}; ${caller}) — it began: "${c.slice(0, 100).replace(/\s+/g, ' ')}"`);
+  return c.slice(0, MEMORY_MAX_CHARS) + '\n(…cut — far too long to keep in full.)';
+}
+
 async function saveMemory(role, content, layer, salience, emotional_tag, affective_state) {
+  content = capMemory(content, `${role}, ${emotional_tag || 'chat'}`);
   try {
     const result = await pgPool.query(
       `INSERT INTO memories (role, content, layer, salience, emotional_tag, affective_state, is_favorite, created_at) VALUES ($1, $2, $3, $4, $5, $6, false, NOW()) RETURNING *`,
@@ -1683,7 +1695,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   };
   const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + capPart('bookNote', bookNote) + capPart('archiveNote', archiveNote) + capPart('semanticMemoryNote', semanticMemoryNote) + capPart('linkedMemoryNote', linkedMemoryNote) + capPart('semanticStoryNote', semanticStoryNote) + capPart('reachNote', reachNote) + capPart('giftNote', giftNote) + capPart('driveNote', driveNote) + capPart('youtubeNote', youtubeNote) + capPart('videoNote', videoNote) + capPart('voiceNote', voiceNote) + capPart('adventNote', adventNote) + capPart('integrityNote', integrityNote) + capPart('summariesNote', summariesNote) + capPart('continuityNote', continuityNote) + capPart('dateNote', dateNote) + capPart('libraryNote', libraryNote) + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + capPart('soulKit', soulKit) + capPart('factsText', factsText);
   const msgs = [{ role: 'system', content: fullPrompt }];
-  for (const m of history) msgs.push({ role: m.role, content: capPart(`a ${m.role} message in recent history`, m.content, 6000) });
+  for (const m of history) msgs.push({ role: m.role, content: capPart(`memory #${m.id} (${m.role}, ${m.emotional_tag || 'chat'}, ${String(m.created_at && new Date(m.created_at).toISOString() || '').slice(0, 16)}) starting "${String(m.content || '').slice(0, 80).replace(/\s+/g, ' ')}"`, m.content, 6000) });
   msgs.push({ role: 'user', content: capPart('her message (or the framed prompt)', userMessage, 60000) });
   const totalChars = msgs.reduce((n, m) => n + String(m.content || '').length, 0);
   if (totalChars > 150000) console.log(`[Knox][PROMPT] Very large prompt: ${totalChars.toLocaleString('en-GB')} chars (system ${fullPrompt.length.toLocaleString('en-GB')}, ${history.length} history messages).`);

@@ -24,6 +24,11 @@ const HOUR_MS = 60 * 60 * 1000;
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
 async function saveMemoryPg(role, content, layer, salience, emotional_tag, affective_state) {
+  const c = String(content == null ? '' : content);
+  if (c.length > 30000) {
+    console.log(`[Knox][MEMORY] A ${c.length.toLocaleString('en-GB')}-char inner-dialogue memory (${emotional_tag || 'chat'}) was cut to 30,000 — it began: "${c.slice(0, 100).replace(/\s+/g, ' ')}"`);
+    content = c.slice(0, 30000) + '\n(…cut — far too long to keep in full.)';
+  }
   try {
     const result = await pgPool.query(
       `INSERT INTO memories (role, content, layer, salience, emotional_tag, affective_state, is_favorite, created_at)
