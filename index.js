@@ -1732,6 +1732,8 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   // "[Continued unfinished poem: …]" or "[Wrote autonomously: …]". Sometimes the
   // model copies that pattern onto the end of a reply. Those notes are his,
   // not words to her, so they're taken back out (and logged).
+  // Thinking models (e.g. Kimi) can put their private reasoning in <think> tags — never part of a reply.
+  responseText = String(responseText || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*?<\/think>/i, '').trim();
   const before = responseText;
   responseText = responseText.replace(PRIVATE_NOTE, '').replace(/\n{3,}/g, '\n\n').trim();
   if (responseText !== before) console.log(`[Knox][REPLY] Removed a private activity note he'd copied into his reply (${before.length - responseText.length} chars).`);
