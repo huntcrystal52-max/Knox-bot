@@ -186,12 +186,33 @@ const firstSentences = (t, n) => (String(t || '').match(/[^.!?]+[.!?]+/g) || [St
 
 // Where a book sits in its series: the number in its title if there is one
 // ("Book 4", "Vol. 2", "#3"), otherwise the order the books were added.
-const WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+const UNITS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+// "twenty-eight" / "thirty one" / "seven" → a number (or null).
+function wordsToNumber(w) {
+  const parts = String(w || '').toLowerCase().split(/[\s-]+/).filter(Boolean);
+  if (!parts.length) return null;
+  let n = 0, used = false;
+  for (const p of parts) {
+    if (TENS[p] != null) { n += TENS[p]; used = true; }
+    else if (UNITS[p] != null) { n += UNITS[p]; used = true; }
+    else return null;
+  }
+  return used ? n : null;
+}
+const NUMWORD = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)(?:[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?';
 function seriesNumber(title) {
-  const t = String(title || '');
-  const m = t.match(/\b(?:book|vol(?:ume)?\.?|part|no\.?|#)\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/i) || t.match(/\((?:[^)]*?)(\d+)\)\s*$/) || t.match(/#\s*(\d+)/);
-  if (!m) return null;
-  return WORDS[m[1].toLowerCase()] || Number(m[1]);
+  const t = String(title || '').trim();
+  // "Book 4", "Vol. 2", "Part 3", "#5"
+  let m = t.match(new RegExp(`\\b(?:book|vol(?:ume)?\\.?|part|no\\.?)\\s*(\\d+|${NUMWORD})\\b`, 'i')) || t.match(/#\s*(\d+)/);
+  if (m) return /^\d+$/.test(m[1]) ? Number(m[1]) : wordsToNumber(m[1]);
+  // A title that starts with a number: "28 and a Half Wishes", "Twenty-Nine and a Half Reasons"
+  m = t.match(new RegExp(`^(\\d+(?:\\.\\d+)?|${NUMWORD})\\b(\\s+and\\s+a\\s+half)?`, 'i'));
+  if (m) {
+    const n = /^\d/.test(m[1]) ? Number(m[1]) : wordsToNumber(m[1]);
+    if (n != null) return n + (m[2] ? 0.5 : 0);
+  }
+  return null;
 }
 
 // Earlier books in the same series (same `series` name if set, else same
