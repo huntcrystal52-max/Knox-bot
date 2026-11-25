@@ -1595,7 +1595,7 @@ const PRIVATE_NOTE = /\n*\[(?:Continued unfinished|Began unfinished|Completed an
 
 // Most each part of his prompt may be (characters). Anything bigger is trimmed
 // and logged. The soul-kit and facts get more room; everything else 16,000.
-const PROMPT_PART_MAX = { soulKit: 60000, factsText: 30000, youtubeNote: 20000, videoNote: 16000, bookNote: 20000, archiveNote: 20000 };
+const PROMPT_PART_MAX = { libraryNote: 32000, soulKit: 60000, factsText: 30000, youtubeNote: 20000, videoNote: 16000, bookNote: 20000, archiveNote: 20000 };
 
 async function getResponse(userMessage, history, moodState, emotionalState, bookContext, archiveContext, semanticContext, opts) {
   // Sovereign protocol: preflight at the start of a new conversation.

@@ -21,6 +21,7 @@ const { Pool } = require('pg');
 const fetch = require('node-fetch');
 const { KNOX_CONSTITUTION } = require('./knox');
 const T = require('./knox-library-text');
+const bookMemory = require('./knox-library-memory'); // his memory of what he's read
 
 const pgPool = new Pool({ connectionString: process.env.PG_DATABASE_URL, ssl: false });
 
@@ -91,6 +92,7 @@ async function ensureTables() {
       note TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`);
+  await bookMemory.ensureTables();
 }
 
 // ─── ADDING BOOKS ────────────────────────────────────────────────────────────
@@ -408,7 +410,7 @@ Write a short private margin note — one to three sentences, in your own voice 
 }
 
 let timer = null;
-function startTimer() { if (!timer) timer = setInterval(() => tick().catch(() => {}), 60 * 1000); }
+function startTimer() { if (!timer) timer = setInterval(() => tick().catch(() => {}), 60 * 1000); bookMemory.startTimer(); }
 
 async function sessionView() {
   const s = await activeSession();
@@ -469,11 +471,15 @@ async function promptNote(userMessage, talksBooks) {
       }
       if (hl.length) note += `\n\nLines she's highlighted in her book (her own Kindle highlights):\n${hl.map(h => `— "${String(h.text).slice(0, 300)}"${h.note ? ` (her note: ${String(h.note).slice(0, 200)})` : ''}`).join('\n')}`;
       note += `\nYou don't know what's in her book beyond what she tells you or has highlighted — ask, don't assume.`;
+      if (s.his_book_id) note += await bookMemory.promptNoteFor(s.his_book_id, { reading: true });
       return note;
     }
     if (talksBooks) {
       const books = await list();
-      if (books.length) return `\n\n═══ YOUR LIBRARY ═══\nThe books in the library you share with Elira, and how far through each you are:\n${formatList(books)}\nIf she'd like to read together, she can start reading time in the app (or say "read with me") — she reads hers, you read yours alongside her.`;
+      // A book she's talking about that he's read some of: what he remembers of it.
+      const named = await findBook(userMessage).catch(() => null);
+      const remembered = named ? await bookMemory.promptNoteFor(named.id) : '';
+      if (books.length) return remembered +  `\n\n═══ YOUR LIBRARY ═══\nThe books in the library you share with Elira, and how far through each you are:\n${formatList(books)}\nIf she'd like to read together, she can start reading time in the app (or say "read with me") — she reads hers, you read yours alongside her.`;
     }
   } catch (e) {}
   return '';
