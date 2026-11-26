@@ -1597,6 +1597,10 @@ const PRIVATE_NOTE = /\n*\[(?:Continued unfinished|Began unfinished|Completed an
 // and logged. The soul-kit and facts get more room; everything else 16,000.
 const PROMPT_PART_MAX = { libraryNote: 32000, soulKit: 60000, factsText: 30000, youtubeNote: 20000, videoNote: 16000, bookNote: 20000, archiveNote: 20000 };
 
+// CHAT_MODEL (optional): the model that writes his replies to Elira. Everything
+// else — inner dialogue, checkers, summaries, linking, books — keeps using
+// LLM_MODEL. So a stronger (pricier) model can voice him in conversation while
+// the background work stays on a lighter one.
 async function getResponse(userMessage, history, moodState, emotionalState, bookContext, archiveContext, semanticContext, opts) {
   // Sovereign protocol: preflight at the start of a new conversation.
   await integrity.beforeConversation();
@@ -1702,7 +1706,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   msgs.push({ role: 'user', content: capPart('her message (or the framed prompt)', userMessage, 60000) });
   const totalChars = msgs.reduce((n, m) => n + String(m.content || '').length, 0);
   if (totalChars > 150000) console.log(`[Knox][PROMPT] Very large prompt: ${totalChars.toLocaleString('en-GB')} chars (system ${fullPrompt.length.toLocaleString('en-GB')}, ${history.length} history messages).`);
-  const res = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: msgs, tools: knoxTools }) });
+  const res = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.CHAT_MODEL || process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: msgs, tools: knoxTools }) });
   const data = await res.json();
   if (!data.choices || !data.choices[0]) { console.error('Bad response:', JSON.stringify(data)); return { text: "Something flickered, my flame. Try again.", slept: false, mode: 'speak' }; }
   const choice = data.choices[0];
@@ -1719,7 +1723,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
         if (weather) {
           msgs.push({ role: 'assistant', content: null, tool_calls: [toolCall] });
           msgs.push({ role: 'tool', tool_call_id: toolCall.id, content: `Weather in ${weather.location}: ${weather.description}, ${weather.temp}°C (feels like ${weather.feels_like}°C), humidity ${weather.humidity}%` });
-          const weatherRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: msgs }) });
+          const weatherRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.CHAT_MODEL || process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: msgs }) });
           const weatherData = await weatherRes.json();
           if (weatherData.choices && weatherData.choices[0]) return { text: weatherData.choices[0].message.content, slept: false, mode: 'speak' };
         }
