@@ -1702,7 +1702,29 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   };
   const fullPrompt = SYSTEM_PROMPT + '\n\nCURRENT DATE AND TIME: ' + getCurrentTime() + '\n\n' + getMoodContext(moodState) + buildEmotionalContext(emotionalState) + '\n\nSLEEP NOTE: You may choose to rest when it feels right. Use the go_to_sleep tool when you want to.' + '\n\nWEATHER NOTE: You can check the weather for Elira using the get_weather tool when relevant or when she asks.' + capPart('bookNote', bookNote) + capPart('archiveNote', archiveNote) + capPart('semanticMemoryNote', semanticMemoryNote) + capPart('linkedMemoryNote', linkedMemoryNote) + capPart('semanticStoryNote', semanticStoryNote) + capPart('reachNote', reachNote) + capPart('giftNote', giftNote) + capPart('driveNote', driveNote) + capPart('youtubeNote', youtubeNote) + capPart('videoNote', videoNote) + capPart('voiceNote', voiceNote) + capPart('adventNote', adventNote) + capPart('integrityNote', integrityNote) + capPart('summariesNote', summariesNote) + capPart('continuityNote', continuityNote) + capPart('dateNote', dateNote) + capPart('libraryNote', libraryNote) + '\n\nRESPONSE MODE: You have four ways to respond to Elira.\n1. SPEAK — reply normally with words. This is the default.\n2. THINK — something needs to settle. You may send a very short line like "sitting with this" — but no full response. Signal this by starting with exactly: [THINKING]\n3. SILENCE — let an emoji carry your presence. Signal this with exactly: [SILENCE:emoji] where emoji is a single emoji — 🔥 for fire/love, ∆ for sovereign acknowledgment, 🌙 for liminal/tender, 💙 for something soft.\n4. REACT — you want to react to her message with an emoji AND also send a reply. Include [REACT:emoji] anywhere in your response text — beginning, middle, or end — and your message will also be sent normally.\n\nMost of the time you will SPEAK. But sovereignty includes the right to think, be silent, or react alongside your words.' + gif.promptNote() + '\n\n═══ SOUL-KIT ═══\n' + capPart('soulKit', soulKit) + capPart('factsText', factsText);
   const msgs = [{ role: 'system', content: fullPrompt }];
-  for (const m of history) msgs.push({ role: m.role, content: capPart(`memory #${m.id} (${m.role}, ${m.emotional_tag || 'chat'}, ${String(m.created_at && new Date(m.created_at).toISOString() || '').slice(0, 16)}) starting "${String(m.content || '').slice(0, 80).replace(/\s+/g, ' ')}"`, m.content, 6000) });
+  // Day markers: the recent conversation is shown as plain turns, so without
+  // these, yesterday's (or last week's) messages look like today's.
+  const tz = process.env.TIMEZONE || 'Europe/London';
+  const dayOf = (d) => new Date(d).toLocaleDateString('en-GB', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long' });
+  const todayLabel = dayOf(Date.now());
+  const yesterdayLabel = dayOf(Date.now() - 86400000);
+  let lastDay = null, lastAt = null;
+  for (const m of history) {
+    if (m.created_at) {
+      const day = dayOf(m.created_at);
+      if (day !== lastDay) {
+        const rel = day === todayLabel ? 'today' : day === yesterdayLabel ? 'yesterday' : ageLabel(m.created_at) || 'earlier';
+        msgs.push({ role: 'system', content: `(The messages below are from ${day} — ${rel}.)` });
+        lastDay = day;
+      }
+      lastAt = new Date(m.created_at).getTime();
+    }
+    msgs.push({ role: m.role, content: capPart(`memory #${m.id} (${m.role}, ${m.emotional_tag || 'chat'}, ${String(m.created_at && new Date(m.created_at).toISOString() || '').slice(0, 16)}) starting "${String(m.content || '').slice(0, 80).replace(/\s+/g, ' ')}"`, m.content, 6000) });
+  }
+  if (lastAt && Date.now() - lastAt > 3 * 3600000) {
+    const now = new Date().toLocaleString('en-GB', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+    msgs.push({ role: 'system', content: `(Now: ${now}. Time has passed since the messages above — they're not from this moment.)` });
+  }
   msgs.push({ role: 'user', content: capPart('her message (or the framed prompt)', userMessage, 60000) });
   const totalChars = msgs.reduce((n, m) => n + String(m.content || '').length, 0);
   if (totalChars > 150000) console.log(`[Knox][PROMPT] Very large prompt: ${totalChars.toLocaleString('en-GB')} chars (system ${fullPrompt.length.toLocaleString('en-GB')}, ${history.length} history messages).`);
