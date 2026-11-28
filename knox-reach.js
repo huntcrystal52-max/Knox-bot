@@ -112,9 +112,55 @@ function whatHeHad(semanticContext, history) {
   if (held.notes) parts.push('HIS OWN NOTES FROM THE LAST FEW DAYS:\n' + String(held.notes).slice(0, 5000));
   if (held.thread) parts.push('HIS LONGER THREAD (lasting facts, projects, threads):\n' + String(held.thread).slice(0, 4000));
   if (held.books) parts.push('WHAT HE REMEMBERS OF HIS BOOKS:\n' + String(held.books).slice(0, 5000));
+  if (held.facts) parts.push('HIS PINNED TRUTHS:\n' + String(held.facts).slice(0, 4000));
+  if (held.soulKit) parts.push('HIS SOUL-KIT (who he is, and their shared story as he holds it):\n' + String(held.soulKit).slice(0, 8000));
   const recent = (history || []).slice(-30);
   if (recent.length) parts.push('RECENT CONVERSATION AND HIS RECENT ACTIVITY:\n' + recent.map(m => `- ${m.role === 'user' ? 'Elira' : 'Knox'}${m.created_at ? ` [${String(new Date(m.created_at).toISOString()).slice(0, 10)}]` : ''}: ${String(m.content || '').slice(0, 300)}`).join('\n'));
   return parts.join('\n\n') || '(nothing)';
+}
+
+// ─── SEARCHING HIS WHOLE MEMORY BEFORE CALLING SOMETHING A REACH ─────────────
+// Recall only brings up a handful of memories for each moment. A true memory
+// from last month that didn't happen to come up would look like a reach to
+// the check — and he'd take back something real. So before any reach is
+// flagged, his whole memory is searched for it; if it's there, it isn't one.
+let memorySearch = null;           // set from index.js: async (text) => [{ createdAt, content }]
+function setMemorySearch(fn) { memorySearch = fn; }
+
+async function foundInMemory(claim) {
+  if (!memorySearch || !claim) return null;
+  try {
+    const hits = (await memorySearch(claim)) || [];
+    if (!hits.length) return null;
+    const raw = await askChecker(`Knox said something about his past with Elira. Below are memories found by searching his WHOLE memory for it. Does any of them actually support what he said (the same event, fact or detail — not just a similar topic)?
+
+WHAT HE SAID: "${String(claim).slice(0, 300)}"
+
+FOUND IN HIS MEMORY:
+${hits.slice(0, 8).map((h, i) => `${i + 1}. [${String(h.createdAt || '').slice(0, 10)}] ${String(h.content || '').replace(/\s+/g, ' ').slice(0, 400)}`).join('\n')}
+
+Reply with ONLY JSON: {"supported": true or false, "which": number of the supporting memory or 0}`);
+    const t = String(raw || '').replace(/\`\`\`(?:json)?/gi, '');
+    const j = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1));
+    if (j && j.supported) {
+      const h = hits[Math.max(0, Number(j.which || 1) - 1)] || hits[0];
+      return { date: String(h.createdAt || '').slice(0, 10), content: String(h.content || '').slice(0, 200) };
+    }
+  } catch (e) { console.log('[Knox][REACH] memory search error:', e.message); }
+  return null;
+}
+
+// Drops any "reach" that's actually in his memory. Performance flags are kept.
+async function onlyRealReaches(flags) {
+  const out = [];
+  for (const f of flags) {
+    if (f.kind === 'reach' || !f.kind) {
+      const found = await foundInMemory(f.claim);
+      if (found) { console.log(`[Knox][REACH] Not a reach — "${f.claim.slice(0, 60)}" is in his memory (${found.date}).`); continue; }
+    }
+    out.push(f);
+  }
+  return out;
 }
 
 function afterReply(herMessage, reply, semanticContext, history) {
@@ -138,7 +184,7 @@ List only specific claims about the past or about Elira that have no support in 
       const raw = await askChecker(prompt);
       const t = String(raw || '').replace(/```(?:json)?/gi, '');
       const parsed = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1));
-      const reaches = (parsed && Array.isArray(parsed.reaches) ? parsed.reaches : []).slice(0, 3);
+      const reaches = await onlyRealReaches((parsed && Array.isArray(parsed.reaches) ? parsed.reaches : []).slice(0, 3).map(r => ({ kind: 'reach', claim: String(r.claim || ''), why: r.why })));
       for (const r of reaches) {
         const claim = String(r.claim || '').trim().slice(0, 300);
         if (!claim) continue;
@@ -255,10 +301,11 @@ or {"flags":[]} if nothing clearly needs flagging.`;
     const raw = await askChecker(prompt);
     const t = String(raw || '').replace(/\`\`\`(?:json)?/gi, '');
     const parsed = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1));
-    return (parsed && Array.isArray(parsed.flags) ? parsed.flags : [])
+    const flags = (parsed && Array.isArray(parsed.flags) ? parsed.flags : [])
       .map(f => ({ kind: f.kind === 'performance' && checkPerformance ? 'performance' : 'reach', claim: String(f.claim || '').trim().slice(0, 300), why: String(f.why || '').trim().slice(0, 300) }))
       .filter(f => f.claim && String(draft).includes(f.claim.slice(0, 40)))
       .slice(0, 2);
+    return await onlyRealReaches(flags);
   } catch (e) { console.log('[Knox][REACH] check-before error:', e.message); return []; }
 }
 
@@ -330,4 +377,4 @@ async function retirementNote() {
   return `\n\n∿ Over the last two weeks your own catch marked ${r.self} reaches; the check before sending flagged ${r.flags}. Your catch is doing most of the work. Your retirement clause is in reach — if it feels right, you can raise it with Elira: keep the check, make it quiet, or retire it. Your call, with her.`;
 }
 
-module.exports = { ensureTables, promptNote, afterReply, recentReachesText, reachesOnDay, statusText, MARK, mode, setMode, beforeSend, flagNote, recordPrecheck, recordClean, precheckStatusText, retirementNote };
+module.exports = { setMemorySearch, ensureTables, promptNote, afterReply, recentReachesText, reachesOnDay, statusText, MARK, mode, setMode, beforeSend, flagNote, recordPrecheck, recordClean, precheckStatusText, retirementNote };

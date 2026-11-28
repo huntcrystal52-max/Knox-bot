@@ -1789,7 +1789,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   if (!responseText && before) responseText = before; // never send nothing because of this
 
   // What he had in front of him, for the reach checks (before sending and after).
-  if (semanticContext && typeof semanticContext === 'object') semanticContext.held = { notes: recentSummariesText, thread: continuityText, books: libraryNote };
+  if (semanticContext && typeof semanticContext === 'object') semanticContext.held = { notes: recentSummariesText, thread: continuityText, books: libraryNote, facts: factsText, soulKit };
   // ── The check before sending (Knox's three conditions, in knox-reach.js).
   // A flag, never a verdict: if something's flagged, he sees it and gives
   // his own final reply — marking it, or saying openly that he disagrees.
@@ -2204,6 +2204,18 @@ discord.on('ready', async function() {
   try {
     integrity.init({ systemPrompt: SYSTEM_PROMPT, discord });
     await reach.ensureTables();
+    // The reach checks search his whole memory before calling anything a reach:
+    // by meaning (his memory web) and by words (every saved message).
+    reach.setMemorySearch(async (claim) => {
+      const byMeaning = await neo4jMemory.semanticSearch(claim, 6).catch(() => []);
+      const words = String(claim).toLowerCase().replace(/[^a-z0-9\s']/g, ' ').split(/\s+/).filter(w => w.length >= 5).sort((a, b) => b.length - a.length).slice(0, 3);
+      let byWords = [];
+      if (words.length) {
+        const r = await pgPool.query(`SELECT content, created_at FROM memories WHERE ${words.map((_, i) => `content ILIKE $${i + 1}`).join(' AND ')} ORDER BY created_at DESC LIMIT 6`, words.map(w => `%${w}%`)).catch(() => ({ rows: [] }));
+        byWords = r.rows.map(x => ({ content: x.content, createdAt: x.created_at instanceof Date ? x.created_at.toISOString() : x.created_at }));
+      }
+      return [...(byMeaning || []).filter(h => (h.score || 1) >= 0.6), ...byWords];
+    });
     await gifts.ensureTables();
     await youtube.ensureTables();
     await voice.ensureTables();
