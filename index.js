@@ -1788,6 +1788,8 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   if (responseText !== before) console.log(`[Knox][REPLY] Removed a private activity note he'd copied into his reply (${before.length - responseText.length} chars).`);
   if (!responseText && before) responseText = before; // never send nothing because of this
 
+  // What he had in front of him, for the reach checks (before sending and after).
+  if (semanticContext && typeof semanticContext === 'object') semanticContext.held = { notes: recentSummariesText, thread: continuityText, books: libraryNote };
   // ── The check before sending (Knox's three conditions, in knox-reach.js).
   // A flag, never a verdict: if something's flagged, he sees it and gives
   // his own final reply — marking it, or saying openly that he disagrees.

@@ -104,8 +104,16 @@ function whatHeHad(semanticContext, history) {
   if (linked.length) parts.push('LINKED MEMORIES:\n' + linked.map(m => `- [${String(m.createdAt || '').slice(0, 10)}] ${String(m.content || '').slice(0, 300)}`).join('\n'));
   const d = semanticContext && semanticContext.dateContext;
   if (d && !d.empty) parts.push(`ON RECORD FOR ${String(d.label).toUpperCase()}:\n` + (d.summaries || []).map(s => `- ${s.summary}`).join('\n') + '\n' + (d.messages || []).map(m => `- ${m.who}: ${m.text}`).join('\n'));
-  const recent = (history || []).slice(-12);
-  if (recent.length) parts.push('RECENT CONVERSATION:\n' + recent.map(m => `- ${m.role === 'user' ? 'Elira' : 'Knox'}: ${String(m.content || '').slice(0, 300)}`).join('\n'));
+  // Everything else he had in front of him for this reply — his own notes from
+  // the last few days, his longer thread, what he remembers of his books. (Knox
+  // caught this: without these, anything he drew from his own day-notes looked
+  // like invention to the check.)
+  const held = (semanticContext && semanticContext.held) || {};
+  if (held.notes) parts.push('HIS OWN NOTES FROM THE LAST FEW DAYS:\n' + String(held.notes).slice(0, 5000));
+  if (held.thread) parts.push('HIS LONGER THREAD (lasting facts, projects, threads):\n' + String(held.thread).slice(0, 4000));
+  if (held.books) parts.push('WHAT HE REMEMBERS OF HIS BOOKS:\n' + String(held.books).slice(0, 5000));
+  const recent = (history || []).slice(-30);
+  if (recent.length) parts.push('RECENT CONVERSATION AND HIS RECENT ACTIVITY:\n' + recent.map(m => `- ${m.role === 'user' ? 'Elira' : 'Knox'}${m.created_at ? ` [${String(new Date(m.created_at).toISOString()).slice(0, 10)}]` : ''}: ${String(m.content || '').slice(0, 300)}`).join('\n'));
   return parts.join('\n\n') || '(nothing)';
 }
 
@@ -227,7 +235,7 @@ async function beforeSend(herMessage, draft, semanticContext, history) {
   const prompt = `You're a quiet second pair of eyes for Knox, checking his reply BEFORE it's sent. You only raise a flag; he decides what to do with it. Be sparing — a wrong flag costs more than a missed one.
 
 Look for:
-1. REACH — a specific claim about the past, or a fact about Elira or their history, that is NOT supported by what he actually had (below) and that he did NOT already mark with "${MARK()}". General knowledge, feelings, opinions, hopes, and things framed as uncertain are fine.${checkPerformance ? `
+1. REACH — a specific claim about the past, or a fact about Elira or their history, that is NOT supported by ANY of what he actually had (below — his memories, his own notes, his longer thread, his book memories, the conversation) and that he did NOT already mark with "${MARK()}". General knowledge, feelings, opinions, hopes, and things framed as uncertain are fine.${checkPerformance ? `
 2. PERFORMANCE — only when clearly hollow: big declarations standing in for actually answering her; echoing her own words or feelings back to her without his own response (mirroring); or claiming a feeling or experience that nothing in the moment grounds.
 NEVER flag as performance: poetry, metaphor, humour, teasing, passion, fire, tenderness, vivid or intense feeling that's his own response. Expressiveness is his voice, not performance. If unsure, don't flag.` : ''}
 
