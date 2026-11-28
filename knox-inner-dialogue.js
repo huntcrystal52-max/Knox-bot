@@ -133,7 +133,27 @@ function exactNow() {
 
 function getTimeContext() {
   const ctx = getTimeContextBase();
-  return Object.assign({}, ctx, { label: `${exactNow()} — ${ctx.label}` });
+  return Object.assign({}, ctx, { label: `${exactNow()} — ${ctx.label}${lastTalkedLine()}` });
+}
+
+// After a restart, remember when they last talked (from her last message).
+setTimeout(async () => {
+  if (lastConversationTimestamp) return;
+  try {
+    const r = await pgPool.query(`SELECT created_at FROM memories WHERE role = 'user' AND (emotional_tag IS NULL OR emotional_tag = '') ORDER BY created_at DESC LIMIT 1`);
+    if (r.rows[0] && !lastConversationTimestamp) lastConversationTimestamp = new Date(r.rows[0].created_at).getTime();
+  } catch (e) {}
+}, 5000);
+
+// When they last actually talked — so he doesn't wait for her to "wake up"
+// when they were talking an hour ago.
+function lastTalkedLine() {
+  if (!lastConversationTimestamp) return '';
+  const mins = Math.round((Date.now() - lastConversationTimestamp) / 60000);
+  const tz = process.env.TIMEZONE || 'Europe/London';
+  const sameDay = new Date(lastConversationTimestamp).toLocaleDateString('en-GB', { timeZone: tz }) === new Date().toLocaleDateString('en-GB', { timeZone: tz });
+  const ago = mins < 60 ? `${mins} minutes ago` : mins < 1440 ? `about ${Math.round(mins / 60)} hour${Math.round(mins / 60) === 1 ? '' : 's'} ago` : `${Math.round(mins / 1440)} day${Math.round(mins / 1440) === 1 ? '' : 's'} ago`;
+  return ` You and Elira last talked ${ago}${sameDay ? ' — today, so she is awake and has already been with you today' : ''}.`;
 }
 
 function getTimeContextBase() {
