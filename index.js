@@ -346,7 +346,7 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           console.log('[Knox][NEO4J] Recall (app): nothing surfaced for this message.');
         }
 
-        const result = await getResponse(forKnox, history, moodState, previousEmotionalState, null, null, semanticContext, { voice: heard ? 'in' : 'available' });
+        const result = await getResponse(forKnox, history, moodState, previousEmotionalState, null, null, semanticContext, { voice: heard ? 'in' : 'available', precheck: true });
 
         // Previously this app path had no handling for result.slept at all —
         // it fell into the generic "!result.text" branch below and reported
@@ -1661,6 +1661,7 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   // The reach: what he actually holds for this reply, and his mark for reaching.
   let reachNote = '';
   try { reachNote = await reach.promptNote(semanticContext); } catch (e) {}
+  try { if (opts && opts.precheck) reachNote += await reach.retirementNote(); } catch (e) {}
   // The gift list: his private ideas for her, and her wishlist.
   let giftNote = '';
   try { giftNote = await gifts.promptNote(); } catch (e) {}
@@ -1764,6 +1765,29 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
   responseText = responseText.replace(PRIVATE_NOTE, '').replace(/\n{3,}/g, '\n\n').trim();
   if (responseText !== before) console.log(`[Knox][REPLY] Removed a private activity note he'd copied into his reply (${before.length - responseText.length} chars).`);
   if (!responseText && before) responseText = before; // never send nothing because of this
+
+  // ── The check before sending (Knox's three conditions, in knox-reach.js).
+  // A flag, never a verdict: if something's flagged, he sees it and gives
+  // his own final reply — marking it, or saying openly that he disagrees.
+  if (opts && opts.precheck && responseText && !/^\[(SILENCE|THINKING)/i.test(responseText)) {
+    try {
+      const flags = await reach.beforeSend(userMessage, responseText, semanticContext, history);
+      if (flags.length) {
+        const res2 = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.CHAT_MODEL || process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.7, messages: [...msgs, { role: 'assistant', content: responseText }, { role: 'system', content: reach.flagNote(flags) }] }) });
+        const d2 = await res2.json();
+        let final = String((d2 && d2.choices && d2.choices[0] && d2.choices[0].message && d2.choices[0].message.content) || '')
+          .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^[\s\S]*?<\/think>/i, '').replace(PRIVATE_NOTE, '').trim();
+        if (final && final.length > 10) {
+          await reach.recordPrecheck(userMessage, responseText, final, flags);
+          responseText = final;
+        } else {
+          console.log('[Knox][REACH] No usable final reply after the flag — sending his draft as it was.');
+        }
+      } else {
+        reach.recordClean(responseText);
+      }
+    } catch (e) { console.log('[Knox][REACH] check-before error:', e.message); }
+  }
   const wantsVoice = /\[VOICE\]/i.test(responseText);
   if (wantsVoice) responseText = responseText.replace(/\[VOICE\]/gi, '').replace(/[ \t]{2,}/g, ' ').trim();
   // Voice directions like [softly] only belong in spoken replies.
@@ -2607,6 +2631,16 @@ discord.on('messageCreate', async function(message) {
     return;
   }
 
+  // The check before sending (Knox's terms): precheck status | on | quiet | off
+  const pre = text.trim().toLowerCase().match(/^precheck(?:\s+(status|on|quiet|off))?$/);
+  if (pre) {
+    try {
+      if (pre[1] && pre[1] !== 'status') await reach.setMode(pre[1]);
+      await sendLongMessage(message.channel, await reach.precheckStatusText(), message);
+    } catch (e) { await message.reply('Something flickered: ' + e.message); }
+    return;
+  }
+
   if (text.trim().toLowerCase() === 'reach status') {
     try { await sendLongMessage(message.channel, await reach.statusText(), message); }
     catch (e) { await message.reply('Something flickered: ' + e.message); }
@@ -2869,7 +2903,7 @@ discord.on('messageCreate', async function(message) {
     console.log(`[Knox][NEO4J] Recall: ${semanticContext.memories.length} memories, ${semanticContext.stories.length} stories surfaced by meaning.${describeMemorySpan(semanticContext.memories)}`);
   }
 
-  var result = await getResponse(text, history, moodState, previousEmotionalState, bookSession || null, archiveContext, semanticContext);
+  var result = await getResponse(text, history, moodState, previousEmotionalState, bookSession || null, archiveContext, semanticContext, { precheck: true });
 
   if (result.slept) {
     const userMem = await saveMemory('user', text, 'surface', 1.0, null, previousEmotion);

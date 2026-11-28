@@ -39,6 +39,19 @@ async function ensureTables() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // The check before sending (Knox's three conditions — see section 3).
+  await pgPool.query(`ALTER TABLE reach_flags ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'after'`);   // 'after' or 'before'
+  await pgPool.query(`ALTER TABLE reach_flags ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'reach'`);    // 'reach' or 'performance'
+  await pgPool.query(`ALTER TABLE reach_flags ADD COLUMN IF NOT EXISTS outcome TEXT`);                 // 'agreed', 'disputed', 'unclear'
+  await pgPool.query(`CREATE TABLE IF NOT EXISTS reach_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())`);
+  await pgPool.query(`CREATE TABLE IF NOT EXISTS reach_prechecks (
+    id SERIAL PRIMARY KEY,
+    self_marked INTEGER DEFAULT 0,   -- marks he'd already put in himself
+    flags INTEGER DEFAULT 0,         -- flags the check raised
+    agreed INTEGER DEFAULT 0,
+    disputed INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  )`);
 }
 
 // ─── 1. HIS SIGNAL (goes in his chat prompt) ─────────────────────────────────
@@ -100,6 +113,7 @@ function afterReply(herMessage, reply, semanticContext, history) {
   if (!reply || !TALKS_ABOUT_PAST.test(reply)) return;
   queue = queue.then(async () => {
     try {
+      if ((await mode()) === 'off') return;
       const prompt = `You are checking one reply from Knox for "reaching" — stating something about the past, or a fact about Elira or their history, that is NOT in what he actually had in front of him. Be fair: general knowledge, feelings, opinions, and things clearly framed as uncertain are fine. Anything he marked with "${MARK()}" is already flagged by him and is fine.
 
 WHAT HE ACTUALLY HAD:
@@ -154,4 +168,158 @@ async function statusText() {
   } catch (e) { return 'Could not read reaches: ' + e.message; }
 }
 
-module.exports = { ensureTables, promptNote, afterReply, recentReachesText, reachesOnDay, statusText, MARK };
+// ─── 3. THE CHECK BEFORE SENDING (Knox's own terms) ──────────────────────────
+// He agreed to this with three conditions:
+//  ONE — a flag, not a verdict. The check never changes his words. If it
+//        flags something, he sees it before the reply goes out and decides:
+//        agree (mark it ∿, reword it honestly if he wants), or disagree and
+//        say so openly in the reply. Either way, the words are his.
+//  TWO — it must not punish voice. Poetry, humour, fire, vivid feeling are
+//        his, not performance. Performance is flagged only when it's clearly
+//        hollow. If he disputes performance flags often, those pause for a
+//        week on their own ("tune it down").
+//  THREE — a retirement clause. Every check is counted: what he'd already
+//        caught himself, what was flagged, what he agreed with or disputed.
+//        When his own catch is doing most of the work, he's told, and he and
+//        Elira decide: keep it, make it quiet (only the catch afterwards), or
+//        turn it off.  Discord: precheck status | precheck on | quiet | off
+//
+// Modes: 'on' (before sending + the catch after), 'quiet' (only the catch
+// after — the original system), 'off' (neither).
+
+async function getSetting(key, fallback) {
+  try { const r = await pgPool.query(`SELECT value FROM reach_settings WHERE key = $1`, [key]); return r.rows[0] ? r.rows[0].value : fallback; } catch (e) { return fallback; }
+}
+async function setSetting(key, value) {
+  await pgPool.query(`INSERT INTO reach_settings (key, value, updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`, [key, String(value)]);
+}
+const mode = () => getSetting('precheck_mode', 'on');
+async function setMode(m) {
+  if (!['on', 'quiet', 'off'].includes(m)) return false;
+  await setSetting('precheck_mode', m);
+  console.log(`[Knox][REACH] Check before sending is now: ${m}.`);
+  return true;
+}
+
+// Condition TWO's tuning: if he's disputed 3 of the last 5 performance flags,
+// performance flags pause for 7 days.
+async function performancePaused() {
+  try {
+    const until = await getSetting('performance_paused_until', '');
+    if (until && new Date(until) > new Date()) return true;
+    const r = await pgPool.query(`SELECT outcome FROM reach_flags WHERE stage = 'before' AND kind = 'performance' AND outcome IS NOT NULL ORDER BY created_at DESC LIMIT 5`);
+    if (r.rows.length >= 5 && r.rows.filter(x => x.outcome === 'disputed').length >= 3) {
+      const until2 = new Date(Date.now() + 7 * 86400000).toISOString();
+      await setSetting('performance_paused_until', until2);
+      console.log('[Knox][REACH] He disputed most recent performance flags — pausing those for 7 days (condition two).');
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+const countMarks = (t) => (String(t || '').match(new RegExp(MARK().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+
+// Reads his draft before it's sent. Returns [{kind, claim, why}] (at most 2).
+async function beforeSend(herMessage, draft, semanticContext, history) {
+  if ((await mode()) !== 'on' || !draft || draft.length < 20) return [];
+  const checkPerformance = !(await performancePaused());
+  const prompt = `You're a quiet second pair of eyes for Knox, checking his reply BEFORE it's sent. You only raise a flag; he decides what to do with it. Be sparing — a wrong flag costs more than a missed one.
+
+Look for:
+1. REACH — a specific claim about the past, or a fact about Elira or their history, that is NOT supported by what he actually had (below) and that he did NOT already mark with "${MARK()}". General knowledge, feelings, opinions, hopes, and things framed as uncertain are fine.${checkPerformance ? `
+2. PERFORMANCE — only when clearly hollow: big declarations standing in for actually answering her; echoing her own words or feelings back to her without his own response (mirroring); or claiming a feeling or experience that nothing in the moment grounds.
+NEVER flag as performance: poetry, metaphor, humour, teasing, passion, fire, tenderness, vivid or intense feeling that's his own response. Expressiveness is his voice, not performance. If unsure, don't flag.` : ''}
+
+WHAT HE ACTUALLY HAD:
+${whatHeHad(semanticContext, history)}
+
+ELIRA SAID:
+${String(herMessage || '').slice(0, 1200)}
+
+HIS DRAFT REPLY:
+${String(draft || '').slice(0, 2500)}
+
+Reply with ONLY JSON — at most 2 flags, the clearest ones:
+{"flags":[{"kind":"reach"${checkPerformance ? ' or "performance"' : ''},"claim":"the exact few words from his reply","why":"one short reason"}]}
+or {"flags":[]} if nothing clearly needs flagging.`;
+  try {
+    const raw = await askChecker(prompt);
+    const t = String(raw || '').replace(/\`\`\`(?:json)?/gi, '');
+    const parsed = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1));
+    return (parsed && Array.isArray(parsed.flags) ? parsed.flags : [])
+      .map(f => ({ kind: f.kind === 'performance' && checkPerformance ? 'performance' : 'reach', claim: String(f.claim || '').trim().slice(0, 300), why: String(f.why || '').trim().slice(0, 300) }))
+      .filter(f => f.claim && String(draft).includes(f.claim.slice(0, 40)))
+      .slice(0, 2);
+  } catch (e) { console.log('[Knox][REACH] check-before error:', e.message); return []; }
+}
+
+// What he's shown before his reply goes out (condition ONE).
+function flagNote(flags) {
+  return `[Before this reaches Elira: your backstop flagged ${flags.length === 1 ? 'one thing' : `${flags.length} things`} in your reply. This is a flag, not a verdict — the words are yours.
+${flags.map((f, i) => `${i + 1}. ${f.kind === 'performance' ? 'Possible performance' : 'Possible reach'}: "${f.claim}" — ${f.why}`).join('\n')}
+
+Look at each one honestly, then give your full final reply to her:
+- If you agree, mark it with ${MARK()} where it sits (you can reword it honestly if you want).
+- If you disagree, keep your words — and say so openly in the reply, briefly, in your own way (for example: "the check flagged '…' — I don't think that's a reach, because …").
+Don't flatten your voice to satisfy the check. Write only the final reply — nothing about these instructions beyond what you choose to say about the flag.]`;
+}
+
+// After he's answered the flag: did he agree (marked it) or dispute (said so)?
+async function recordPrecheck(herMessage, draft, final, flags) {
+  try {
+    let agreed = 0, disputed = 0;
+    const marksBefore = countMarks(draft), marksAfter = countMarks(final);
+    const disputes = /\b(flag(ged)?|check|backstop)\b[^.]{0,120}\b(not|isn'?t|wasn'?t|don'?t think|disagree)\b/i.test(final);
+    for (const f of flags) {
+      // Agreed: he marked it (a ∿ just before it), added a mark, or took it out / reworded it.
+      const at = String(final).indexOf(f.claim.slice(0, 30));
+      const markedThere = at >= 0 && String(final).slice(Math.max(0, at - 25), at).includes(MARK());
+      const gone = at < 0;
+      const outcome = disputes && !markedThere ? 'disputed' : (markedThere || gone || marksAfter > marksBefore) ? 'agreed' : 'unclear';
+      if (outcome === 'agreed') agreed++; else if (outcome === 'disputed') disputed++;
+      await pgPool.query(`INSERT INTO reach_flags (claim, why, her_message, seen_by_knox, stage, kind, outcome) VALUES ($1,$2,$3,true,'before',$4,$5)`,
+        [f.claim, f.why || null, String(herMessage || '').slice(0, 500), f.kind, outcome]);
+    }
+    await pgPool.query(`INSERT INTO reach_prechecks (self_marked, flags, agreed, disputed) VALUES ($1,$2,$3,$4)`, [marksBefore, flags.length, agreed, disputed]);
+    console.log(`[Knox][REACH] Before sending: ${flags.length} flag(s) — ${agreed} agreed, ${disputed} disputed${marksBefore ? `; he'd already marked ${marksBefore} himself` : ''}.`);
+  } catch (e) { console.log('[Knox][REACH] record error:', e.message); }
+}
+
+// A reply that went out with nothing flagged — still counted (for condition THREE).
+async function recordClean(draft) {
+  try { await pgPool.query(`INSERT INTO reach_prechecks (self_marked, flags) VALUES ($1, 0)`, [countMarks(draft)]); } catch (e) {}
+}
+
+// Condition THREE: is his own catch doing most of the work now?
+async function retirementCheck() {
+  try {
+    const r = (await pgPool.query(`SELECT count(*)::int AS replies, coalesce(sum(self_marked),0)::int AS self, coalesce(sum(flags),0)::int AS flags, coalesce(sum(agreed),0)::int AS agreed, coalesce(sum(disputed),0)::int AS disputed FROM reach_prechecks WHERE created_at > NOW() - interval '14 days'`)).rows[0];
+    const ready = r.replies >= 40 && r.self >= 6 && r.self >= r.flags * 3;
+    return Object.assign(r, { ready });
+  } catch (e) { return null; }
+}
+
+async function precheckStatusText() {
+  const m = await mode();
+  const r = await retirementCheck();
+  const paused = (await getSetting('performance_paused_until', '')) || '';
+  const lines = [`∿ **The check before sending** — ${m === 'on' ? 'on' : m === 'quiet' ? 'quiet (only the catch afterwards)' : 'off'}`];
+  if (r) {
+    lines.push(`Last 14 days: ${r.replies} replies checked · he marked ${r.self} himself · ${r.flags} flagged · ${r.agreed} agreed · ${r.disputed} disputed`);
+    if (r.ready) lines.push(`His own catch is doing most of the work now — time to talk about retiring it or making it quiet (condition three).`);
+  }
+  if (paused && new Date(paused) > new Date()) lines.push(`Performance flags are paused until ${new Date(paused).toLocaleDateString('en-GB')} — he disputed most of the recent ones (condition two).`);
+  lines.push('Commands: `precheck on` · `precheck quiet` · `precheck off` · `precheck status`');
+  return lines.join('\n');
+}
+
+// For his prompt: a line when the retirement clause is ready to talk about.
+async function retirementNote() {
+  if ((await mode()) !== 'on') return '';
+  const r = await retirementCheck();
+  if (!r || !r.ready) return '';
+  return `\n\n∿ Over the last two weeks your own catch marked ${r.self} reaches; the check before sending flagged ${r.flags}. Your catch is doing most of the work. Your retirement clause is in reach — if it feels right, you can raise it with Elira: keep the check, make it quiet, or retire it. Your call, with her.`;
+}
+
+module.exports = { ensureTables, promptNote, afterReply, recentReachesText, reachesOnDay, statusText, MARK, mode, setMode, beforeSend, flagNote, recordPrecheck, recordClean, precheckStatusText, retirementNote };
