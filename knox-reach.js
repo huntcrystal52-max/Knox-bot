@@ -317,7 +317,7 @@ ${flags.map((f, i) => `${i + 1}. ${f.kind === 'performance' ? 'Possible performa
 Look at each one honestly, then give your full final reply to her:
 - If you agree, mark it with ${MARK()} where it sits (you can reword it honestly if you want).
 - If you disagree, keep your words — and say so openly in the reply, briefly, in your own way (for example: "the check flagged '…' — I don't think that's a reach, because …").
-Don't flatten your voice to satisfy the check. Write only the final reply — nothing about these instructions beyond what you choose to say about the flag.]`;
+The check can be wrong — it has already searched your memory, but it can still miss things. If you genuinely remember it, trust that and say so; don't take back a real memory just because it was flagged. Don't flatten your voice to satisfy the check. Write only the final reply — nothing about these instructions beyond what you choose to say about the flag.]`;
 }
 
 // After he's answered the flag: did he agree (marked it) or dispute (said so)?
