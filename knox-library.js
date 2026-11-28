@@ -214,19 +214,70 @@ async function migrateFromSupabase(supabase) {
 
 async function list() {
   const r = await pgPool.query(`
-    SELECT b.id, b.title, b.author, b.source, b.total_passages, b.added_at, coalesce(p.last_passage, 0) AS last_passage
+    SELECT b.id, b.title, b.author, b.source, b.total_passages, b.added_at, b.series, b.series_no, coalesce(p.last_passage, 0) AS last_passage
       FROM library_books b LEFT JOIN library_progress p ON p.book_id = b.id
      ORDER BY b.title`);
-  return r.rows.map(b => ({
+  const books = r.rows.map(b => ({
     ...b,
     pct: b.total_passages ? Math.min(100, Math.round(b.last_passage / b.total_passages * 100)) : 0,
     finished: b.total_passages > 0 && b.last_passage >= b.total_passages,
     started: b.last_passage > 0
   }));
+  return withLocks(books);
+}
+
+// ─── SERIES AND THE LOCK ─────────────────────────────────────────────────────
+// Books Elira puts in a series (the Series box in the app's Library) are read
+// in order: a book stays locked until he's finished every book before it.
+// Order: the number she gives it, else the number its title starts with
+// ("Twenty-Eight and a Half Wishes" → 28.5), else the order they were added.
+// Books not in a series are never locked.
+function seriesOrder(b) {
+  if (b.series_no != null) return Number(b.series_no);
+  const n = bookMemory.seriesNumber(b.title);
+  return n != null ? n : null;
+}
+function withLocks(books) {
+  for (const b of books) {
+    b.locked = false; b.waitingFor = null; b.seriesPosition = null;
+    if (!b.series) continue;
+    const group = books.filter(x => x.series && x.series.toLowerCase() === b.series.toLowerCase())
+      .sort((x, y) => {
+        const a = seriesOrder(x), c = seriesOrder(y);
+        if (a != null && c != null) return a - c;
+        if (a != null) return -1;
+        if (c != null) return 1;
+        return new Date(x.added_at) - new Date(y.added_at);
+      });
+    const idx = group.findIndex(x => x.id === b.id);
+    b.seriesPosition = idx + 1;
+    const blocker = group.slice(0, idx).find(x => !x.finished);
+    if (blocker) { b.locked = true; b.waitingFor = blocker.title; }
+  }
+  return books;
+}
+
+// Marks a book as finished (e.g. one they read together before the lock
+// existed, that his bookmark doesn't quite show as done).
+async function markFinished(id) {
+  const b = (await pgPool.query(`SELECT id, title, total_passages FROM library_books WHERE id = $1`, [Number(id)])).rows[0];
+  if (!b) return { error: 'That book isn\'t in the library.' };
+  await setProgress(b.id, b.total_passages);
+  console.log(`[Knox][LIBRARY] Marked "${b.title}" as finished.`);
+  return { ok: true };
+}
+
+async function setSeries({ id, series, seriesNo }) {
+  const name = clean(series, 120) || null;
+  const no = seriesNo === '' || seriesNo == null || isNaN(Number(seriesNo)) ? null : Number(seriesNo);
+  const r = await pgPool.query(`UPDATE library_books SET series = $2, series_no = $3 WHERE id = $1 RETURNING title`, [Number(id), name, no]);
+  if (!r.rows[0]) return { error: 'That book isn\'t in the library.' };
+  console.log(`[Knox][LIBRARY] "${r.rows[0].title}" — series: ${name || '(none)'}${no != null ? ` #${no}` : ''}.`);
+  return { ok: true };
 }
 
 function formatList(books) {
-  return books.map(b => `— "${b.title}"${b.author ? ' by ' + b.author : ''} — ${b.finished ? 'finished' : b.started ? b.pct + '% read' : 'not started'}`).join('\n');
+  return books.map(b => `— "${b.title}"${b.author ? ' by ' + b.author : ''} — ${b.finished ? 'finished' : b.locked ? `locked until you finish "${b.waitingFor}"` : b.started ? b.pct + '% read' : 'not started'}`).join('\n');
 }
 
 async function removeBook(id) {
@@ -324,7 +375,7 @@ async function askKnox(prompt, temperature) {
 
 // He chooses his own book for reading time, unless she suggested one.
 async function chooseHisBook(herBook) {
-  const books = (await list()).filter(b => !b.finished);
+  const books = (await list()).filter(b => !b.finished && !b.locked);
   if (!books.length) return null;
   if (books.length === 1) return books[0];
   const reply = await askKnox(`Elira wants to have reading time with you — she's reading her own book${herBook ? ` ("${clean(herBook, 120)}")` : ''}, and you'll read one of yours alongside her. Which of your books do you want to read? Here's your library:\n${formatList(books)}\n\nReply with just the exact title.`, 0.6);
@@ -335,6 +386,7 @@ async function startSession({ herBook, hisBook }) {
   await pgPool.query(`UPDATE reading_sessions SET status = 'ended', ended_at = NOW() WHERE status = 'active'`);
   let book = null;
   if (hisBook) book = /^\d+$/.test(String(hisBook)) ? (await list()).find(b => b.id === Number(hisBook)) : await findBook(hisBook, { unfinishedOnly: true });
+  if (book && book.locked) return { error: `🔒 "${book.title}" is locked until he finishes "${book.waitingFor}" — it's later in the series.` };
   if (!book) book = await chooseHisBook(herBook);
   if (!book) return { error: 'There are no unfinished books in his library yet.' };
   const r = await pgPool.query(`INSERT INTO reading_sessions (her_book, his_book_id) VALUES ($1,$2) RETURNING *`, [clean(herBook, 200) || null, book.id]);
@@ -486,7 +538,7 @@ async function promptNote(userMessage, talksBooks) {
 }
 
 module.exports = {
-  ensureTables, migrateFromSupabase, startTimer, tick, whereAmI, readingStatus,
+  ensureTables, migrateFromSupabase, startTimer, tick, whereAmI, readingStatus, setSeries, markFinished,
   addBook, addFromFile, searchClassics, addClassic, removeBook,
   list, formatList, findBook, readNext,
   addHighlights, highlightBooks, highlightsFor,

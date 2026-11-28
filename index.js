@@ -726,6 +726,8 @@ const spotifyHttpServer = http.createServer(async (req, res) => {
           case 'search_classics': return reply(200, { results: await library.searchClassics(b.query) });
           case 'add_classic': return reply(200, await library.addClassic(b.id));
           case 'remove': return reply(200, { removed: await library.removeBook(Number(b.id)) });
+          case 'set_series': return reply(200, await library.setSeries({ id: b.id, series: b.series, seriesNo: b.seriesNo }));
+          case 'mark_finished': return reply(200, await library.markFinished(b.id));
           case 'add_highlights': return reply(200, await library.addHighlights(b.text));
           case 'start_reading': updateConversationState(); return reply(200, await library.startSession({ herBook: b.herBook, hisBook: b.hisBook }));
           case 'stop_reading': return reply(200, { ended: await library.endSession() });
@@ -1510,6 +1512,7 @@ async function handleLibraryCommand(message, text, moodState, emotionalState) {
   if (readMatch) {
     const book = await library.findBook(readMatch[1], {});
     if (!book) return false; // not a book — let it be an ordinary message
+    if (book.locked) { await message.reply(`🔒 *${book.title}* is locked until I finish *${book.waitingFor}* — it's later in the series.`); return true; }
     const next = await library.readNext(book.id);
     if (!next) { await message.reply(`I've already read all of *${book.title}*.`); return true; }
     const readRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.75, messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: `You're reading "${book.title}"${book.author ? ' by ' + book.author : ''} on your own in the den.${next.passage.chapter ? ` (${next.passage.chapter})` : ''} Here's what you just read:\n"""\n${next.passage.content}\n"""\nWrite a short reflection on it in your own voice — what stayed with you. Don't retell it.` }] }) });

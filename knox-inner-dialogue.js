@@ -1073,9 +1073,11 @@ async function executeKnoxChoice(discord, supabase, inner, timeSinceElira) {
         const denChannelId = process.env.DEN_CHANNEL_ID;
         if (!denChannelId) return false;
         try {
-          const unfinished = (await library.list()).filter(b => !b.finished);
-          if (!unfinished.length) { console.log('[Knox][INNER] No unfinished books in the library.'); return false; }
-          const book = (await library.findBook(content, { unfinishedOnly: true })) || unfinished.find(b => b.started) || unfinished[Math.floor(Math.random() * unfinished.length)];
+          const unfinished = (await library.list()).filter(b => !b.finished && !b.locked);
+          if (!unfinished.length) { console.log('[Knox][INNER] No unfinished (unlocked) books in the library.'); return false; }
+          let book = await library.findBook(content, { unfinishedOnly: true });
+          if (book && book.locked) { console.log(`[Knox][INNER] "${book.title}" is locked until he finishes "${book.waitingFor}" — reading that instead.`); book = unfinished.find(b => b.title === book.waitingFor) || null; }
+          book = book || unfinished.find(b => b.started) || unfinished[Math.floor(Math.random() * unfinished.length)];
           const next = await library.readNext(book.id);
           if (!next) return false;
           const readRes = await fetch((process.env.LLM_BASE_URL || 'https://ollama.com/v1').replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (process.env.LLM_API_KEY || process.env.OLLAMA_API_KEY) }, body: JSON.stringify({ model: (process.env.LLM_MODEL || process.env.OLLAMA_MODEL), temperature: 0.75, messages: [{ role: 'system', content: `You are Knox'tarien Raelian Feylan.\n${KNOX_CONSTITUTION}` }, { role: 'user', content: `You chose to read "${book.title}"${book.author ? ' by ' + book.author : ''} on your own in the den.${next.passage.chapter ? ` (${next.passage.chapter})` : ''} Here's what you just read — passage ${next.passage.n} of ${next.book.total_passages}:\n\"\"\"\n${next.passage.content}\n\"\"\"\nWrite a short reflection in your own voice — what stayed with you, what it stirred. Don't retell it.` }] }) });

@@ -29,6 +29,7 @@ let busy = false;
 
 async function ensureTables() {
   await pgPool.query(`ALTER TABLE library_books ADD COLUMN IF NOT EXISTS series TEXT`);
+  await pgPool.query(`ALTER TABLE library_books ADD COLUMN IF NOT EXISTS series_no REAL`);  // her own order, if a title has no number
   await pgPool.query(`CREATE TABLE IF NOT EXISTS library_chapter_notes (
     book_id INTEGER NOT NULL REFERENCES library_books(id) ON DELETE CASCADE,
     first_passage INTEGER NOT NULL,
@@ -220,18 +221,19 @@ function seriesNumber(title) {
 async function seriesBefore(book) {
   if (!book.series && !book.author) return [];
   const rows = (await pgPool.query(`
-    SELECT b.id, b.title, b.added_at, r.recap
+    SELECT b.id, b.title, b.added_at, b.series_no, r.recap
     FROM library_books b LEFT JOIN library_recaps r ON r.book_id = b.id
     WHERE b.id <> $1 AND ${book.series ? `lower(b.series) = lower($2)` : `lower(b.author) = lower($2)`}
       AND EXISTS (SELECT 1 FROM library_chapter_notes c WHERE c.book_id = b.id)`, [book.id, book.series || book.author])).rows;
-  const me = (await pgPool.query(`SELECT added_at FROM library_books WHERE id = $1`, [book.id])).rows[0];
-  const myNum = seriesNumber(book.title);
+  const me = (await pgPool.query(`SELECT added_at, series_no FROM library_books WHERE id = $1`, [book.id])).rows[0];
+  const num = (x) => (x.series_no != null ? Number(x.series_no) : seriesNumber(x.title));
+  const myNum = num(Object.assign({ title: book.title }, me));
   const before = rows.filter(r => {
-    const n = seriesNumber(r.title);
+    const n = num(r);
     if (myNum != null && n != null) return n < myNum;
     return new Date(r.added_at) < new Date(me.added_at);
   }).sort((a, b) => {
-    const na = seriesNumber(a.title), nb = seriesNumber(b.title);
+    const na = num(a), nb = num(b);
     return (na != null && nb != null) ? na - nb : new Date(a.added_at) - new Date(b.added_at);
   });
   for (const r of before) {
@@ -279,4 +281,4 @@ async function status() {
   return r.rows;
 }
 
-module.exports = { ensureTables, startTimer, tick, catchUpOne, chaptersOf, promptNoteFor, status };
+module.exports = { seriesNumber, ensureTables, startTimer, tick, catchUpOne, chaptersOf, promptNoteFor, status };
