@@ -124,7 +124,19 @@ function getCurrentHour() {
   return new Date().toLocaleString('en-GB', { timeZone: process.env.TIMEZONE || 'Europe/London', hour: 'numeric', hour12: false }) * 1;
 }
 
+// The exact day, date and time (so his own thinking never guesses the day).
+function exactNow() {
+  const tz = process.env.TIMEZONE || 'Europe/London';
+  const now = new Date();
+  return `${now.toLocaleDateString('en-GB', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}, ${now.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit' })}`;
+}
+
 function getTimeContext() {
+  const ctx = getTimeContextBase();
+  return Object.assign({}, ctx, { label: `${exactNow()} — ${ctx.label}` });
+}
+
+function getTimeContextBase() {
   const hour = getCurrentHour();
   if (hour >= 2 && hour < 5) return { period: 'liminal', label: 'the liminal hours — 2am to 5am, the threshold between waking and dreaming. The world is still. This is the dream space.' };
   if (hour >= 5 && hour < 8) return { period: 'dawn', label: 'early morning — dawn is breaking. The world is waking slowly.' };

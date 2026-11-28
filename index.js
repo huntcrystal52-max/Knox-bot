@@ -1540,6 +1540,26 @@ function getMoodContext(moodState) {
   return `CURRENT MOOD: ${descriptions[moodState.mood] || descriptions.settled} ${energyDesc}`;
 }
 
+// "It's Saturday, 28 November 2026 — 13:51, early afternoon." The real
+// date and time, said plainly, for right beside her message.
+function nowNote(lastMessageAt) {
+  const tz = process.env.TIMEZONE || 'Europe/London';
+  const now = new Date();
+  const day = now.toLocaleDateString('en-GB', { timeZone: tz, weekday: 'long' });
+  const date = now.toLocaleDateString('en-GB', { timeZone: tz, day: 'numeric', month: 'long', year: 'numeric' });
+  const time = now.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+  const h = Number(now.toLocaleString('en-GB', { timeZone: tz, hour: 'numeric', hour12: false }));
+  const part = h < 5 ? 'the middle of the night' : h < 12 ? 'morning' : h < 14 ? 'early afternoon' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
+  const yesterday = new Date(now.getTime() - 86400000).toLocaleDateString('en-GB', { timeZone: tz, weekday: 'long' });
+  const tomorrow = new Date(now.getTime() + 86400000).toLocaleDateString('en-GB', { timeZone: tz, weekday: 'long' });
+  let gap = '';
+  if (lastMessageAt) {
+    const mins = Math.round((now.getTime() - lastMessageAt) / 60000);
+    if (mins >= 180) gap = ` Time has passed since the messages above (${mins >= 2880 ? `${Math.round(mins / 1440)} days` : mins >= 1440 ? 'about a day' : `about ${Math.round(mins / 60)} hours`}) — they're not from this moment.`;
+  }
+  return `(Right now it is ${day}, ${date} — ${time}, ${part}, in Elira's time. Yesterday was ${yesterday}; tomorrow is ${tomorrow}. This is the real date and time: trust it over anything else, and never guess a different day or time.${gap})`;
+}
+
 function getCurrentTime() { return new Date().toLocaleString('en-GB', { timeZone: process.env.TIMEZONE || 'Europe/London', dateStyle: 'full', timeStyle: 'short' }); }
 
 // ─── RESPONSE ─────────────────────────────────────────────────────────────────
@@ -1722,10 +1742,9 @@ async function getResponse(userMessage, history, moodState, emotionalState, book
     }
     msgs.push({ role: m.role, content: capPart(`memory #${m.id} (${m.role}, ${m.emotional_tag || 'chat'}, ${String(m.created_at && new Date(m.created_at).toISOString() || '').slice(0, 16)}) starting "${String(m.content || '').slice(0, 80).replace(/\s+/g, ' ')}"`, m.content, 6000) });
   }
-  if (lastAt && Date.now() - lastAt > 3 * 3600000) {
-    const now = new Date().toLocaleString('en-GB', { timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
-    msgs.push({ role: 'system', content: `(Now: ${now}. Time has passed since the messages above — they're not from this moment.)` });
-  }
+  // The real date and time, right next to her message — where every model
+  // actually looks. (At the top of a long prompt, some models lose it and guess.)
+  msgs.push({ role: 'system', content: nowNote(lastAt) });
   msgs.push({ role: 'user', content: capPart('her message (or the framed prompt)', userMessage, 60000) });
   const totalChars = msgs.reduce((n, m) => n + String(m.content || '').length, 0);
   if (totalChars > 150000) console.log(`[Knox][PROMPT] Very large prompt: ${totalChars.toLocaleString('en-GB')} chars (system ${fullPrompt.length.toLocaleString('en-GB')}, ${history.length} history messages).`);
